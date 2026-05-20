@@ -1,0 +1,112 @@
+# Trading Dashboard
+
+A professional AI-powered trading dashboard with real-time agent monitoring and backtesting.
+
+## Features
+
+- Real-time chatbot interface for natural language commands
+- Live agent monitoring sidebar with status updates
+- Trading operations (place orders, manage positions)
+- Strategy management and ranking by P&L
+- Backtesting engine with CSV export
+- Stock screener with performance ranking
+- Agent workflow visualization
+- Settings panel for API keys and risk management
+
+## Tech Stack
+
+- **Frontend:** React 18, TypeScript, Tailwind CSS, Vite
+- **Backend:** FastAPI, WebSocket, SQLAlchemy
+- **Database:** SQLite
+- **Deployment:** Render.com
+
+## Getting Started - Local Development
+
+### Prerequisites
+- Python 3.11+
+- Node.js 16+
+- Git
+
+### Backend Setup
+
+```bash
+cd backend
+pip install -r requirements.txt
+python main.py
+```
+
+Backend runs on http://localhost:8000
+
+### Frontend Setup (new terminal)
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Frontend runs on http://localhost:5173
+
+## Deployment
+
+Push to GitHub. Render.com auto-deploys on every commit.
+
+## API Endpoints
+
+- **POST /chat** - Send command to agents
+- **POST /agent-status** - Agents publish status (WebSocket broadcast)
+- **POST /backtest** - Run strategy backtest
+- **POST /trade** - Execute order
+- **GET /positions** - Get active positions
+- **GET /strategies** - List all strategies
+- **GET /screener** - Get stock screener results
+- **POST /settings/keys** - Save API keys
+- **WS /ws/agent-monitor** - Live agent updates via WebSocket
+- **GET /health** - Health check
+
+## Agent Integration
+
+Your local agents connect to dashboard by:
+
+1. POSTing to `/agent-status` every 5-10 seconds
+2. Sending their status, current task, progress, and skills
+3. Dashboard broadcasts updates via WebSocket to frontend
+
+## Usage Examples
+
+### Chat Commands
+
+- "analyze INFY 4h" - Technical analysis
+- "backtest RSI strategy" - Run backtest
+- "stock screener" - Get ranked stocks
+- "buy RELIANCE 100" - Place order (paper/live)
+
+### Agent Startup
+
+```bash
+python agents/boss_agent.py
+```
+
+This starts all child agents:
+- analysis_agent
+- strategy_agent
+- execution_agent
+- risk_agent
+- news_agent
+
+## Monitoring
+
+- Open dashboard: https://your-domain.com
+- Watch Agent Monitor sidebar for real-time status
+- All agents should show as "online" when running
+
+## Support
+
+Check the logs:
+- Browser: F12 > Console
+- Render: Dashboard > Logs
+- Terminal: Check output of agents and backend
+
+## License
+
+MIT

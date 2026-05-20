@@ -1,0 +1,42 @@
+export interface AgentState {
+  agent_id: string;
+  status: 'online' | 'processing' | 'idle' | 'error';
+  task: string;
+  progress: number;
+  skills?: string[];
+  cpu_percent?: number;
+  memory_mb?: number;
+  timestamp?: string;
+}
+
+export interface Strategy {
+  id: string;
+  name: string;
+  symbol: string;
+  timeframe: string;
+  status: string;
+  pnl: number;
+  win_rate: number;
+  created_date: string;
+}
+
+export interface BacktestResult {
+  strategy: string;
+  symbol: string;
+  total_trades: number;
+  win_rate: number;
+  pnl: number;
+  sharpe_ratio: number;
+  max_drawdown: number;
+  profit_factor: number;
+}
+
+export interface Trade {
+  symbol: string;
+  quantity: number;
+  entry_price: number;
+  current_price: number;
+  pnl: number;
+  pnl_percent: number;
+  entry_time: string;
+}
