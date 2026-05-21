@@ -3,13 +3,8 @@ services:
     name: trading-dashboard
     env: node
     plan: free
-    buildCommand: |
-      npm install
-      npm run build
-      cd .. && pip install -r requirements.txt
-    startCommand: |
-      npm run build 2>/dev/null || true
-      python backend/main.py
+    buildCommand: bash build.sh
+    startCommand: python backend/main.py
     envVars:
       - key: NODE_VERSION
         value: "18"
