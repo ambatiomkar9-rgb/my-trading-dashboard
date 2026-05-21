@@ -3,7 +3,17 @@ services:
     name: trading-dashboard
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt && cd frontend && npm install && npm run build && cd ..
+    buildCommand: |
+      echo "Installing Node.js..."
+      curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+      apt-get install -y nodejs
+      echo "Building frontend..."
+      cd frontend
+      npm install
+      npm run build
+      cd ..
+      echo "Installing Python dependencies..."
+      pip install -r requirements.txt
     startCommand: python backend/main.py
     envVars:
       - key: PYTHON_VERSION
