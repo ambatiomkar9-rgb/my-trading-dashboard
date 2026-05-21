@@ -3,10 +3,10 @@ services:
     name: trading-dashboard
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt && cd frontend && npm install && npm run build
-    startCommand: gunicorn -w 1 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:$PORT backend.main:app
+    buildCommand: pip install -r requirements.txt && cd frontend && npm install && npm run build && cd ..
+    startCommand: python backend/main.py
     envVars:
       - key: PYTHON_VERSION
         value: "3.11"
-      - key: DATABASE_URL
-        value: "sqlite:///./trading.db"
+      - key: PORT
+        value: "8000"
