@@ -198,17 +198,31 @@ async def get_strategies():
     return strategies
 
 # ==================== SERVE FRONTEND ====================
-frontend_path = os.path.join(os.path.dirname(__file__), "../frontend/dist")
+# Get the absolute path to the frontend dist folder
+BASE_DIR = Path(__file__).parent.parent
+frontend_path = BASE_DIR / "frontend" / "dist"
 
-if os.path.exists(frontend_path):
-    app.mount("/", StaticFiles(directory=frontend_path, html=True), name="static")
+print(f"📁 Looking for frontend at: {frontend_path}")
+print(f"📁 Frontend exists: {frontend_path.exists()}")
+
+if frontend_path.exists():
+    print(f"✅ Frontend dist folder found! Serving from: {frontend_path}")
+    app.mount("/", StaticFiles(directory=str(frontend_path), html=True), name="static")
 else:
-    print(f"⚠ Frontend dist folder not found at {frontend_path}")
+    print(f"⚠️ Frontend dist folder not found at {frontend_path}")
+    print(f"⚠️ Contents of {BASE_DIR}:")
+    try:
+        for item in BASE_DIR.iterdir():
+            print(f"  - {item.name}")
+    except:
+        pass
     
-    # Fallback: serve index.html for all routes
+    # Fallback: serve a message
     @app.get("/{full_path:path}")
     async def serve_frontend(full_path: str):
-        index_path = os.path.join(frontend_path, "index.html")
-        if os.path.exists(index_path):
-            return FileResponse(index_path)
-        return {"detail": "Frontend not built yet"}
+        return {"detail": "Frontend not built yet", "path": str(frontend_path), "exists": frontend_path.exists()}
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
