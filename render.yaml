@@ -1,22 +1,17 @@
 services:
   - type: web
     name: trading-dashboard
-    env: python
+    env: node
     plan: free
     buildCommand: |
-      echo "Installing Node.js..."
-      curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
-      apt-get install -y nodejs
-      echo "Building frontend..."
-      cd frontend
       npm install
       npm run build
-      cd ..
-      echo "Installing Python dependencies..."
-      pip install -r requirements.txt
-    startCommand: python backend/main.py
+      cd .. && pip install -r requirements.txt
+    startCommand: |
+      npm run build 2>/dev/null || true
+      python backend/main.py
     envVars:
-      - key: PYTHON_VERSION
-        value: "3.11"
+      - key: NODE_VERSION
+        value: "18"
       - key: PORT
         value: "8000"
