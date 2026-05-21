@@ -1,10 +1,14 @@
 import { useState } from 'react';
 
+interface FetchOptions extends RequestInit {
+  headers?: Record<string, string>;
+}
+
 export function useApi() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const call = async (endpoint: string, options: any = {}) => {
+  const call = async (endpoint: string, options: FetchOptions = {}) => {
     setLoading(true);
     setError(null);
 
