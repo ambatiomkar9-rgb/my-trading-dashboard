@@ -198,15 +198,17 @@ async def get_strategies():
     return strategies
 
 # ==================== SERVE FRONTEND ====================
-# Serve React frontend files
-frontend_path = "/opt/render/project/src/frontend/dist"
+frontend_path = os.path.join(os.path.dirname(__file__), "../frontend/dist")
 
 if os.path.exists(frontend_path):
     app.mount("/", StaticFiles(directory=frontend_path, html=True), name="static")
 else:
-    print("⚠ Frontend dist folder not found. React app not served.")
-
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    print(f"⚠ Frontend dist folder not found at {frontend_path}")
+    
+    # Fallback: serve index.html for all routes
+    @app.get("/{full_path:path}")
+    async def serve_frontend(full_path: str):
+        index_path = os.path.join(frontend_path, "index.html")
+        if os.path.exists(index_path):
+            return FileResponse(index_path)
+        return {"detail": "Frontend not built yet"}
