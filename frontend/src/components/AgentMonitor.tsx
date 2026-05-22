@@ -23,14 +23,19 @@ export function AgentMonitor() {
   }, []);
 
   return (
-    <div style={{ padding: 16 }}>
-      <h3>Agent Monitor</h3>
-      {Object.values(agents).length === 0 ? <p>No agents online</p> : null}
+    <div className="space-y-2">
+      <div className="text-xs uppercase tracking-wider text-gray-400 font-semibold">Agent Monitor</div>
+      {Object.values(agents).length === 0 ? <div className="text-gray-500 text-sm">No agents online</div> : null}
       {Object.values(agents).map((a) => (
-        <div key={a.agent_id} style={{ background: '#111', marginBottom: 8, padding: 8, borderRadius: 6 }}>
-          <div><b>{a.agent_id}</b> - {a.status}</div>
-          <div>{a.task}</div>
-          <div>Progress: {a.progress}%</div>
+        <div key={a.agent_id} className="bg-gray-900 border border-gray-800 rounded p-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="font-semibold text-sm">{a.agent_id}</div>
+            <div className="text-xs text-gray-300">{a.status}</div>
+          </div>
+          <div className="text-xs text-gray-400 mt-1">{a.task}</div>
+          <div className="mt-2 h-1 bg-gray-800 rounded overflow-hidden">
+            <div className="h-full bg-blue-500" style={{ width: `${Math.max(0, Math.min(100, a.progress || 0))}%` }} />
+          </div>
         </div>
       ))}
     </div>

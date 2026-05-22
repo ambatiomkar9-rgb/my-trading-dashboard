@@ -26,7 +26,7 @@ command_responses: Dict[str, Dict[str, Any]] = {}
 positions: List[Dict[str, Any]] = []
 order_history: List[Dict[str, Any]] = []
 last_buy_alert_at: Dict[str, datetime] = {}
-ALERT_COOLDOWN_SECONDS = 60
+ALERT_COOLDOWN_SECONDS = int(os.getenv("TELEGRAM_ALERT_COOLDOWN_SECONDS", "60"))
 
 settings_store: Dict[str, Any] = {
     "broker": "upstox",
