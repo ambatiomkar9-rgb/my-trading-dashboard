@@ -25,6 +25,9 @@ pending_commands: Dict[str, Dict[str, Any]] = {}
 command_responses: Dict[str, Dict[str, Any]] = {}
 positions: List[Dict[str, Any]] = []
 order_history: List[Dict[str, Any]] = []
+# Lightweight stores to support the "watchlist/approval" workflow in the extra scripts/UI.
+watchlist_items: List[Dict[str, Any]] = []
+trade_signals: List[Dict[str, Any]] = []
 last_buy_alert_at: Dict[str, datetime] = {}
 ALERT_COOLDOWN_SECONDS = int(os.getenv("TELEGRAM_ALERT_COOLDOWN_SECONDS", "60"))
 
@@ -63,6 +66,11 @@ async def update_agent_status(data: dict):
     await broadcast_agent_update(data)
     return {'status': 'ok'}
 
+# Back-compat for scripts/UI that call /api/agent-status
+@app.post('/api/agent-status')
+async def update_agent_status_api(data: dict):
+    return await update_agent_status(data)
+
 @app.websocket('/ws/agent-monitor')
 async def ws_monitor(websocket: WebSocket):
     await websocket.accept()
@@ -91,6 +99,11 @@ async def chat(message: ChatMessage):
     cid = str(uuid.uuid4())
     pending_commands[cid] = {'command_id': cid, 'message': message.message, 'timestamp': datetime.now().isoformat(), 'status': 'pending'}
     return {'command_id': cid, 'status': 'queued'}
+
+# Back-compat for older UI patterns that assume an /api prefix.
+@app.post('/api/chat')
+async def chat_api(message: ChatMessage):
+    return await chat(message)
 
 @app.get('/chat/pending-commands')
 async def pending():
@@ -127,11 +140,28 @@ async def buy_signal_alert(payload: dict):
         remaining = ALERT_COOLDOWN_SECONDS - int((now - prev).total_seconds())
         return {'status': 'cooldown', 'symbol': symbol, 'remaining_seconds': max(0, remaining)}
 
+    # Always register the signal so the dashboard/UI can show it (even if Telegram isn't configured).
+    signal_rec = {
+        'id': str(uuid.uuid4()),
+        'symbol': symbol,
+        'strategy_id': str(payload.get('strategy_id') or 'default'),
+        'signal_type': 'buy',
+        'signal_price': float(payload.get('price') or payload.get('signal_price') or 0.0),
+        'signal_time': datetime.now().isoformat(),
+        'technical_score': float(payload.get('technical_score') or 0.0),
+        'news_score': float(payload.get('news_score') or 0.0),
+        'fundamental_score': float(payload.get('fundamental_score') or 0.0),
+        'risk_score': float(payload.get('risk_score') or 0.0),
+        'overall_score': float(payload.get('overall_score') or 0.0),
+        'approval_status': 'pending',
+    }
+    trade_signals.insert(0, signal_rec)
+
     sent = await send_telegram_alert(f"BUY SIGNAL: {symbol}\nSignal: {signal}\nTime: {datetime.now().isoformat()}")
-    if not sent:
-        return {'status': 'telegram_not_configured_or_failed', 'symbol': symbol}
     last_buy_alert_at[symbol] = now
-    return {'status': 'sent', 'symbol': symbol, 'cooldown_seconds': ALERT_COOLDOWN_SECONDS}
+    if not sent:
+        return {'status': 'telegram_not_configured_or_failed', 'symbol': symbol, 'cooldown_seconds': ALERT_COOLDOWN_SECONDS, 'signal_id': signal_rec['id']}
+    return {'status': 'sent', 'symbol': symbol, 'cooldown_seconds': ALERT_COOLDOWN_SECONDS, 'signal_id': signal_rec['id']}
 
 async def send_telegram_alert(text: str) -> bool:
     if not settings_store.get('telegram_enabled', False):
@@ -157,6 +187,10 @@ async def send_telegram_alert(text: str) -> bool:
 async def get_positions():
     return positions
 
+@app.get('/api/positions')
+async def get_positions_api():
+    return await get_positions()
+
 @app.delete('/positions/{symbol}')
 async def close_position(symbol: str):
     global positions
@@ -176,9 +210,17 @@ async def place_trade(data: dict):
     positions.append({'symbol': symbol, 'qty': qty, 'entry_price': price, 'current_price': price, 'pnl': 0, 'pnl_pct': 0})
     return {'status': 'success', 'order_id': o['id']}
 
+@app.post('/api/trade')
+async def place_trade_api(data: dict):
+    return await place_trade(data)
+
 @app.get('/order-history')
 async def get_order_history():
     return order_history
+
+@app.get('/api/order-history')
+async def get_order_history_api():
+    return await get_order_history()
 
 @app.get('/strategies')
 async def get_strategies():
@@ -186,6 +228,10 @@ async def get_strategies():
         {'id': '1', 'name': 'EMA Cross', 'symbol': 'INFY', 'timeframe': '4h', 'status': 'running', 'pnl': 8500, 'win_rate': 72, 'total_trades': 45, 'equity_curve': [{'date': '2026-05-18', 'value': 100000}]},
         {'id': '2', 'name': 'Pine Momentum', 'symbol': 'NIFTY', 'timeframe': '1h', 'status': 'backtested', 'pnl': 4200, 'win_rate': 64, 'total_trades': 33, 'equity_curve': [{'date': '2026-05-18', 'value': 100000}]},
     ]
+
+@app.get('/api/strategies')
+async def get_strategies_api():
+    return await get_strategies()
 
 @app.post('/strategy/create')
 async def create_strategy(payload: dict):
@@ -209,6 +255,10 @@ async def generate_pinescript(payload: dict):
 async def backtest(_: dict):
     return {'total_trades': 45, 'win_rate': 72, 'profit_factor': 2.3, 'sharpe': 1.87, 'max_dd': -8.5, 'net_pnl': 25000, 'equity_curve': [{'date': '2026-01', 'value': 100000}], 'trades': [{'entry_date': '2026-01-05', 'exit_date': '2026-01-10', 'entry_price': 1950, 'profit': 238}]}
 
+@app.post('/api/backtest')
+async def backtest_api(payload: dict):
+    return await backtest(payload)
+
 @app.get('/screener')
 async def screener():
     return [
@@ -216,14 +266,111 @@ async def screener():
         {'rank': 2, 'symbol': 'BTC', 'price': 43200, 'change_pct': 2.8, 'pnl_pct': 28, 'signal': 'buy', 'timeframe': '1d'}
     ]
 
+@app.get('/api/screener')
+async def screener_api():
+    return await screener()
+
 @app.get('/settings')
 async def get_settings():
     return settings_store
+
+@app.get('/api/settings')
+async def get_settings_api():
+    return await get_settings()
 
 @app.post('/settings')
 async def save_settings(payload: dict):
     settings_store.update(payload)
     return {'status': 'saved', 'settings': settings_store}
+
+@app.post('/api/settings')
+async def save_settings_api(payload: dict):
+    return await save_settings(payload)
+
+# ---------------------------------------------------------------------------
+# Watchlist + signal approval endpoints (used by the extra scripts / UI file)
+# ---------------------------------------------------------------------------
+
+@app.get('/api/watchlist')
+async def api_get_watchlist():
+    return watchlist_items
+
+@app.post('/api/watchlist/add')
+async def api_add_watchlist(payload: dict):
+    symbol = str(payload.get('symbol', '')).upper().strip()
+    if not symbol:
+        raise HTTPException(status_code=400, detail='symbol required')
+    if any(item.get('symbol') == symbol and item.get('status', 'active') != 'removed' for item in watchlist_items):
+        return {'status': 'exists', 'symbol': symbol}
+    item = {
+        'id': str(uuid.uuid4()),
+        'symbol': symbol,
+        'strategy_id': str(payload.get('strategy_id') or 'default'),
+        'auto_trade': bool(payload.get('auto_trade', False)),
+        'status': 'active',
+        'added_date': datetime.now().isoformat(),
+        'last_checked': None,
+        'last_signal': None,
+        'last_signal_price': None,
+        'quantity_to_buy': int(payload.get('quantity_to_buy') or payload.get('quantity') or 1),
+    }
+    watchlist_items.append(item)
+    return {'status': 'added', 'item': item}
+
+@app.post('/api/watchlist/remove')
+async def api_remove_watchlist(payload: dict):
+    symbol = str(payload.get('symbol', '')).upper().strip()
+    if not symbol:
+        raise HTTPException(status_code=400, detail='symbol required')
+    for item in watchlist_items:
+        if item.get('symbol') == symbol and item.get('status') != 'removed':
+            item['status'] = 'removed'
+            return {'status': 'removed', 'symbol': symbol}
+    return {'status': 'not_found', 'symbol': symbol}
+
+@app.get('/api/signals/pending')
+async def api_pending_signals():
+    return [s for s in trade_signals if s.get('approval_status') == 'pending']
+
+@app.post('/api/signal/approve')
+async def api_approve_signal(payload: dict):
+    sid = payload.get('signal_id') or payload.get('id')
+    if not sid:
+        raise HTTPException(status_code=400, detail='signal_id required')
+    for s in trade_signals:
+        if str(s.get('id')) == str(sid):
+            s['approval_status'] = 'approved'
+            s['approval_time'] = datetime.now().isoformat()
+            return {'status': 'approved', 'signal': s}
+    return {'status': 'not_found', 'signal_id': sid}
+
+@app.get('/api/system/health')
+async def api_system_health():
+    # Minimal health payload for UI; you can expand this later.
+    return {
+        'timestamp': datetime.now().isoformat(),
+        'ollama_status': 'unknown',
+        'broker_status': 'unknown',
+        'agents_online': len(agent_states),
+        'alert_cooldown_seconds': ALERT_COOLDOWN_SECONDS,
+    }
+
+@app.get('/api/portfolio')
+async def api_portfolio():
+    total_value = 0.0
+    total_pnl = 0.0
+    for p in positions:
+        qty = float(p.get('qty') or 0)
+        cur = float(p.get('current_price') or 0)
+        total_value += qty * cur
+        total_pnl += float(p.get('pnl') or 0)
+    total_pnl_pct = (total_pnl / total_value * 100) if total_value else 0.0
+    return {
+        'total_value': total_value,
+        'total_pnl': total_pnl,
+        'total_pnl_pct': total_pnl_pct,
+        'open_positions': len(positions),
+    }
 
 @app.post('/settings/keys')
 async def save_settings_keys(payload: dict):
