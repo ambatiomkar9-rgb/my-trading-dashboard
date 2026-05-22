@@ -37,11 +37,24 @@ function App() {
     return () => ws.close();
   }, []);
 
+  const safeJson = async (res: Response): Promise<any> => {
+    const text = await res.text();
+    try {
+      return text ? JSON.parse(text) : {};
+    } catch {
+      return { raw: text };
+    }
+  };
+
   const pollResponse = async (commandId: string, attempts = 240): Promise<string> => {
     for (let i = 0; i < attempts; i += 1) {
-      const res = await fetch(`${API_URL}/chat/response/${commandId}`);
-      const data = await res.json();
-      if (data.status === 'done' && data.response) return data.response;
+      try {
+        const res = await fetch(`${API_URL}/chat/response/${commandId}`);
+        const data = await safeJson(res);
+        if (data.status === 'done' && data.response) return data.response;
+      } catch {
+        // transient network/poll error; keep waiting
+      }
       await new Promise((r) => setTimeout(r, 500));
     }
     return 'Agent timed out. Please retry.';
@@ -60,17 +73,21 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: userMessage }),
       });
-      const data = await response.json();
+      const data = await safeJson(response);
+      if (!response.ok || !data.command_id) {
+        const detail = data?.detail || data?.raw || `HTTP ${response.status}`;
+        throw new Error(String(detail));
+      }
       const finalResponse = await pollResponse(data.command_id);
       setChatHistory((p) => {
         const next = [...p];
         next[next.length - 1] = { role: 'assistant', content: finalResponse };
         return next;
       });
-    } catch {
+    } catch (err: any) {
       setChatHistory((p) => {
         const next = [...p];
-        next[next.length - 1] = { role: 'assistant', content: 'Error sending command.' };
+        next[next.length - 1] = { role: 'assistant', content: `Error sending command: ${err?.message || 'Unknown error'}` };
         return next;
       });
     } finally {

@@ -7,11 +7,24 @@ export function ChatInterface() {
   const [history, setHistory] = useState<Array<{ role: string; content: string }>>([]);
   const [loading, setLoading] = useState(false);
 
+  const safeJson = async (res: Response): Promise<any> => {
+    const text = await res.text();
+    try {
+      return text ? JSON.parse(text) : {};
+    } catch {
+      return { raw: text };
+    }
+  };
+
   const pollResponse = async (commandId: string, attempts = 240): Promise<string> => {
     for (let i = 0; i < attempts; i += 1) {
-      const res = await fetch(`${API_URL}/chat/response/${commandId}`);
-      const data = await res.json();
-      if (data.status === 'done' && data.response) return data.response;
+      try {
+        const res = await fetch(`${API_URL}/chat/response/${commandId}`);
+        const data = await safeJson(res);
+        if (data.status === 'done' && data.response) return data.response;
+      } catch {
+        // transient poll failure
+      }
       await new Promise((r) => setTimeout(r, 500));
     }
     return 'Agent timeout';
@@ -28,17 +41,21 @@ export function ChatInterface() {
       const res = await fetch(`${API_URL}/chat`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: userMessage }),
       });
-      const data = await res.json();
+      const data = await safeJson(res);
+      if (!res.ok || !data.command_id) {
+        const detail = data?.detail || data?.raw || `HTTP ${res.status}`;
+        throw new Error(String(detail));
+      }
       const ans = await pollResponse(data.command_id);
       setHistory((p) => {
         const n = [...p];
         n[n.length - 1] = { role: 'assistant', content: ans };
         return n;
       });
-    } catch {
+    } catch (err: any) {
       setHistory((p) => {
         const n = [...p];
-        n[n.length - 1] = { role: 'assistant', content: 'Error sending message' };
+        n[n.length - 1] = { role: 'assistant', content: `Error sending message: ${err?.message || 'Unknown error'}` };
         return n;
       });
     } finally {
