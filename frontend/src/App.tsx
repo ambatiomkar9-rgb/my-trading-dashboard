@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { OverviewPage } from './components/OverviewPage';
 import { TradingPage } from './components/TradingPage';
 import { StrategiesPage } from './components/StrategiesPage';
 import { BacktestingPage } from './components/BacktestingPage';
@@ -7,20 +8,38 @@ import { SettingsPage } from './components/SettingsPage';
 import { AgentAnimation } from './components/AgentAnimation';
 import { ChatInterface } from './components/ChatInterface';
 import { AgentMonitor } from './components/AgentMonitor';
+import { WatchlistPage } from './components/WatchlistPage';
+import { SignalsPage } from './components/SignalsPage';
+import { PortfolioPage } from './components/PortfolioPage';
 
-type Page = 'chat' | 'trading' | 'strategies' | 'backtesting' | 'screener' | 'settings' | 'animation';
+type Page =
+  | 'overview'
+  | 'chat'
+  | 'watchlist'
+  | 'signals'
+  | 'portfolio'
+  | 'trading'
+  | 'strategies'
+  | 'backtesting'
+  | 'screener'
+  | 'settings'
+  | 'animation';
 
 function App() {
-  const [page, setPage] = useState<Page>('chat');
+  const [page, setPage] = useState<Page>('overview');
 
   const renderPage = () => {
     switch (page) {
+      case 'overview': return <OverviewPage />;
       case 'trading': return <TradingPage />;
       case 'strategies': return <StrategiesPage />;
       case 'backtesting': return <BacktestingPage />;
       case 'screener': return <StockScreener />;
       case 'settings': return <SettingsPage />;
       case 'animation': return <AgentAnimation />;
+      case 'watchlist': return <WatchlistPage />;
+      case 'signals': return <SignalsPage />;
+      case 'portfolio': return <PortfolioPage />;
       default:
         return <ChatInterface />;
     }
@@ -33,7 +52,21 @@ function App() {
         <AgentMonitor />
         <div className="h-px bg-gray-800 my-4" />
         <div className="space-y-2">
-          {(['chat', 'trading', 'strategies', 'backtesting', 'screener', 'settings', 'animation'] as Page[]).map((p) => (
+          {(
+            [
+              'overview',
+              'chat',
+              'watchlist',
+              'signals',
+              'portfolio',
+              'trading',
+              'strategies',
+              'backtesting',
+              'screener',
+              'settings',
+              'animation',
+            ] as Page[]
+          ).map((p) => (
             <button
               key={p}
               onClick={() => setPage(p)}
