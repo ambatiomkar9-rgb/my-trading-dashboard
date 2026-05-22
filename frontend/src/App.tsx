@@ -37,7 +37,7 @@ function App() {
     return () => ws.close();
   }, []);
 
-  const pollResponse = async (commandId: string, attempts = 20): Promise<string> => {
+  const pollResponse = async (commandId: string, attempts = 180): Promise<string> => {
     for (let i = 0; i < attempts; i += 1) {
       const res = await fetch(`${API_URL}/chat/response/${commandId}`);
       const data = await res.json();
