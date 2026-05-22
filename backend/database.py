@@ -13,8 +13,7 @@ from sqlalchemy import (
     Text,
     Index,
 )
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker
 
 # ─── Database URL ────────────────────────────────────────────────────────────
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./trading_dashboard.db")
@@ -181,3 +180,80 @@ class Settings(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     key = Column(String(100), unique=True, index=True, nullable=False)
     value = Column(Text, nullable=True)
+
+
+class WatchlistStock(Base):
+    """
+    Watchlist entries stored in the dashboard DB.
+
+    The continuous monitoring loop runs on the user's laptop (agents) and polls
+    these records from the cloud dashboard.
+    """
+
+    __tablename__ = "watchlist_stocks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(32), unique=True, index=True, nullable=False)
+    strategy_id = Column(String(100), default="default")
+    auto_trade = Column(Boolean, default=False)
+    status = Column(String(20), default="active")  # active | paused | removed
+    added_date = Column(String(50), nullable=True)
+    last_checked = Column(String(50), nullable=True)
+    last_signal = Column(String(20), nullable=True)  # buy | sell | hold
+    last_signal_price = Column(Float, nullable=True)
+    quantity_to_buy = Column(Integer, default=1)
+
+    __table_args__ = (
+        Index("ix_watchlist_stocks_status", "status"),
+    )
+
+
+class TradeSignal(Base):
+    """Trade signals pending approval (Telegram + dashboard)."""
+
+    __tablename__ = "trade_signals"
+
+    id = Column(String(64), primary_key=True, index=True)  # UUID string
+    symbol = Column(String(32), index=True, nullable=False)
+    strategy_id = Column(String(100), default="default")
+    signal_type = Column(String(20), default="buy")  # buy | sell
+    signal_price = Column(Float, default=0.0)
+    signal_time = Column(String(50), nullable=True)
+
+    technical_score = Column(Float, default=0.0)
+    news_score = Column(Float, default=0.0)
+    fundamental_score = Column(Float, default=0.0)
+    risk_score = Column(Float, default=0.0)
+    overall_score = Column(Float, default=0.0)
+
+    approval_status = Column(String(20), default="pending")  # pending | approved | skipped | rejected
+    approval_time = Column(String(50), nullable=True)
+    approval_reason = Column(Text, nullable=True)
+
+    order_id = Column(String(64), nullable=True)
+    execution_price = Column(Float, nullable=True)
+    execution_time = Column(String(50), nullable=True)
+
+    __table_args__ = (
+        Index("ix_trade_signals_approval_status", "approval_status"),
+        Index("ix_trade_signals_signal_time", "signal_time"),
+    )
+
+
+class WatchlistAlert(Base):
+    """Alerts emitted by agents and optionally sent to Telegram."""
+
+    __tablename__ = "watchlist_alerts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(32), index=True, nullable=False)
+    alert_type = Column(String(50), default="signal_alert")
+    alert_message = Column(Text, nullable=False)
+    alert_time = Column(String(50), nullable=True)
+    telegram_sent = Column(Boolean, default=False)
+    telegram_message_id = Column(String(64), nullable=True)
+
+
+def init_db() -> None:
+    """Create all tables if they don't exist (safe to call on startup)."""
+    Base.metadata.create_all(bind=engine)

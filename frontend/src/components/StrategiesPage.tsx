@@ -19,6 +19,15 @@ export function StrategiesPage() {
   const [strategies, setStrategies] = useState<Strategy[]>([]);
   const [selected, setSelected] = useState<Strategy | null>(null);
   const [showNewForm, setShowNewForm] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [newStrategy, setNewStrategy] = useState({
+    name: '',
+    symbol: 'INFY',
+    timeframe: '4h',
+    status: 'paused' as 'running' | 'paused' | 'backtested',
+    entry_rule: '',
+    exit_rule: '',
+  });
   const [pineLoading, setPineLoading] = useState(false);
   const [pineScript, setPineScript] = useState('');
   const [pineError, setPineError] = useState<string | null>(null);
@@ -66,6 +75,40 @@ export function StrategiesPage() {
     }
   };
 
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const name = newStrategy.name.trim();
+    const symbol = newStrategy.symbol.trim().toUpperCase();
+    if (!name || !symbol) {
+      alert('Name and symbol are required');
+      return;
+    }
+    setCreating(true);
+    try {
+      const res = await fetch(`${API_URL}/strategy/create`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name,
+          symbol,
+          timeframe: newStrategy.timeframe,
+          status: newStrategy.status,
+          entry_rule: newStrategy.entry_rule,
+          exit_rule: newStrategy.exit_rule,
+        }),
+      });
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(String(data?.detail || data?.raw || `HTTP ${res.status}`));
+      setShowNewForm(false);
+      setNewStrategy({ name: '', symbol: 'INFY', timeframe: '4h', status: 'paused', entry_rule: '', exit_rule: '' });
+      await fetchStrategies();
+    } catch (err: any) {
+      alert(err?.message || 'Failed to create strategy');
+    } finally {
+      setCreating(false);
+    }
+  };
+
   const generatePineScript = async () => {
     if (!selected) return;
     setPineError(null);
@@ -100,12 +143,87 @@ export function StrategiesPage() {
       </div>
 
       {showNewForm ? (
-        <div className="mb-8 bg-gray-900 border border-gray-800 rounded-lg p-4">
-          <div className="text-gray-300 text-sm">
-            Strategy creation UI is wired to `POST /strategy/create` in the backend. If you want, I can turn this into a
-            full modal form with validation.
+        <form onSubmit={handleCreate} className="mb-8 bg-gray-900 border border-gray-800 rounded-lg p-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm text-gray-300 mb-2">Name</label>
+              <input
+                value={newStrategy.name}
+                onChange={(e) => setNewStrategy({ ...newStrategy, name: e.target.value })}
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white"
+                placeholder="EMA Cross"
+              />
+            </div>
+            <div>
+              <label className="block text-sm text-gray-300 mb-2">Symbol</label>
+              <input
+                value={newStrategy.symbol}
+                onChange={(e) => setNewStrategy({ ...newStrategy, symbol: e.target.value })}
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white"
+                placeholder="INFY"
+              />
+            </div>
+            <div>
+              <label className="block text-sm text-gray-300 mb-2">Timeframe</label>
+              <select
+                value={newStrategy.timeframe}
+                onChange={(e) => setNewStrategy({ ...newStrategy, timeframe: e.target.value })}
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white"
+              >
+                <option value="1h">1h</option>
+                <option value="4h">4h</option>
+                <option value="1d">1d</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm text-gray-300 mb-2">Status</label>
+              <select
+                value={newStrategy.status}
+                onChange={(e) => setNewStrategy({ ...newStrategy, status: e.target.value as any })}
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white"
+              >
+                <option value="paused">paused</option>
+                <option value="running">running</option>
+                <option value="backtested">backtested</option>
+              </select>
+            </div>
+            <div className="sm:col-span-2">
+              <label className="block text-sm text-gray-300 mb-2">Entry Rule / Buy Conditions (text or JSON)</label>
+              <textarea
+                value={newStrategy.entry_rule}
+                onChange={(e) => setNewStrategy({ ...newStrategy, entry_rule: e.target.value })}
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white min-h-[84px]"
+                placeholder='Example: {"rsi":{"below":30},"trend":"bullish"}'
+              />
+            </div>
+            <div className="sm:col-span-2">
+              <label className="block text-sm text-gray-300 mb-2">Exit Rule / Sell Conditions (text or JSON)</label>
+              <textarea
+                value={newStrategy.exit_rule}
+                onChange={(e) => setNewStrategy({ ...newStrategy, exit_rule: e.target.value })}
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white min-h-[84px]"
+                placeholder='Example: {"rsi":{"above":70}}'
+              />
+            </div>
           </div>
-        </div>
+
+          <div className="mt-4 flex items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setShowNewForm(false)}
+              className="px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded font-semibold"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={creating}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 rounded font-semibold"
+            >
+              {creating ? 'Creating...' : 'Create Strategy'}
+            </button>
+          </div>
+        </form>
       ) : null}
 
       <section className="mb-8">
@@ -208,7 +326,7 @@ export function StrategiesPage() {
                 disabled={pineLoading}
                 className="px-3 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 rounded text-sm font-semibold"
               >
-                {pineLoading ? 'Generating…' : 'Generate PineScript'}
+                {pineLoading ? 'Generating...' : 'Generate PineScript'}
               </button>
             </div>
             {pineError ? <div className="text-red-400 text-sm mb-2">{pineError}</div> : null}
@@ -217,7 +335,7 @@ export function StrategiesPage() {
                 {pineScript}
               </pre>
             ) : (
-              <div className="text-gray-400 text-sm">Click “Generate PineScript” to create a starter strategy.</div>
+              <div className="text-gray-400 text-sm">Click "Generate PineScript" to create a starter strategy.</div>
             )}
           </div>
         </section>
@@ -225,4 +343,3 @@ export function StrategiesPage() {
     </div>
   );
 }
-

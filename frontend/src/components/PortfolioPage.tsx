@@ -44,7 +44,7 @@ export function PortfolioPage() {
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-3xl font-bold">Portfolio</h1>
         <button onClick={refresh} className="px-3 py-2 bg-gray-900 hover:bg-gray-800 rounded text-sm font-semibold">
-          {loading ? 'Refreshing…' : 'Refresh'}
+          {loading ? 'Refreshing...' : 'Refresh'}
         </button>
       </div>
 
@@ -80,4 +80,3 @@ export function PortfolioPage() {
     </div>
   );
 }
-

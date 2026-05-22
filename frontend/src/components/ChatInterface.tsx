@@ -87,14 +87,14 @@ export function ChatInterface() {
           value={message}
           onChange={(e) => setMessage(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && !loading && sendMessage()}
-          placeholder="Ask: analyze INFY, backtest BTC, generate PineScript strategy…"
+          placeholder="Ask: analyze INFY, backtest BTC, generate PineScript strategy..."
         />
         <button
           onClick={sendMessage}
           disabled={loading}
           className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 rounded font-semibold"
         >
-          {loading ? 'Sending…' : 'Send'}
+          {loading ? 'Sending...' : 'Send'}
         </button>
       </div>
     </div>

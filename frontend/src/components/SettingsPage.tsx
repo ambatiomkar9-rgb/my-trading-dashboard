@@ -110,7 +110,7 @@ export function SettingsPage() {
     <div className="p-6 bg-black text-white">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-3xl font-bold">Settings</h1>
-        {loading ? <div className="text-gray-400 text-sm">Loading…</div> : null}
+        {loading ? <div className="text-gray-400 text-sm">Loading...</div> : null}
       </div>
 
       <section className="mb-8 bg-gray-900 p-6 rounded-lg">
@@ -241,7 +241,7 @@ export function SettingsPage() {
           Test Connection
         </button>
         <div className="mt-2 text-xs text-gray-400">
-          Note: the Render-hosted dashboard cannot reach your laptop’s `localhost`. This test is useful only when running the
+          Note: the Render-hosted dashboard cannot reach your laptop's `localhost`. This test is useful only when running the
           frontend locally.
         </div>
       </section>
@@ -300,4 +300,3 @@ export function SettingsPage() {
     </div>
   );
 }
-

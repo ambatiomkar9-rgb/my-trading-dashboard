@@ -79,7 +79,7 @@ export function WatchlistPage() {
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-3xl font-bold">Watchlist</h1>
         <button onClick={refresh} className="px-3 py-2 bg-gray-900 hover:bg-gray-800 rounded text-sm font-semibold">
-          {loading ? 'Refreshing…' : 'Refresh'}
+          {loading ? 'Refreshing...' : 'Refresh'}
         </button>
       </div>
 
@@ -124,7 +124,7 @@ export function WatchlistPage() {
           </div>
         </div>
         <div className="text-xs text-gray-500 mt-3">
-          Note: on Render free plan, this watchlist is in-memory and resets on redeploy/restart (unless you attach a DB).
+          Watchlist is stored in the dashboard database (SQLite by default, Postgres if you attach `DATABASE_URL` on Render).
         </div>
       </div>
 
@@ -171,4 +171,3 @@ export function WatchlistPage() {
     </div>
   );
 }
-

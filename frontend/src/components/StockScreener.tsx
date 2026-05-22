@@ -65,7 +65,7 @@ export function StockScreenerPage() {
     <div className="p-6 bg-black text-white">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-3xl font-bold">Stock Screener</h1>
-        {loading ? <div className="text-gray-400 text-sm">Loading…</div> : null}
+        {loading ? <div className="text-gray-400 text-sm">Loading...</div> : null}
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
@@ -137,4 +137,3 @@ export function StockScreenerPage() {
 
 // Back-compat for existing import in App.tsx
 export const StockScreener = StockScreenerPage;
-

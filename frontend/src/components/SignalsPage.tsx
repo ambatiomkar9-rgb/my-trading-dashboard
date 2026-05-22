@@ -19,6 +19,7 @@ export function SignalsPage() {
   const [signals, setSignals] = useState<TradeSignal[]>([]);
   const [loading, setLoading] = useState(true);
   const [approving, setApproving] = useState<string | null>(null);
+  const [skipping, setSkipping] = useState<string | null>(null);
 
   const safeJson = async (res: Response) => {
     const text = await res.text();
@@ -65,6 +66,25 @@ export function SignalsPage() {
     }
   };
 
+  const skip = async (id: string) => {
+    setSkipping(id);
+    try {
+      const res = await fetch(`${API_URL}/api/signal/skip`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ signal_id: id, reason: 'Skipped from dashboard' }),
+      });
+      const data = await safeJson(res);
+      if (!res.ok) {
+        alert(data?.detail || data?.raw || `HTTP ${res.status}`);
+        return;
+      }
+      await refresh();
+    } finally {
+      setSkipping(null);
+    }
+  };
+
   const summary = useMemo(() => {
     const pending = signals.length;
     const avg = pending ? signals.reduce((a, s) => a + Number(s.overall_score || 0), 0) / pending : 0;
@@ -76,7 +96,7 @@ export function SignalsPage() {
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-3xl font-bold">Signals</h1>
         <button onClick={refresh} className="px-3 py-2 bg-gray-900 hover:bg-gray-800 rounded text-sm font-semibold">
-          {loading ? 'Refreshing…' : 'Refresh'}
+          {loading ? 'Refreshing...' : 'Refresh'}
         </button>
       </div>
 
@@ -125,13 +145,22 @@ export function SignalsPage() {
                   <td className="px-4 py-3 text-right">{Number(s.risk_score || 0).toFixed(0)}</td>
                   <td className="px-4 py-3 text-right font-semibold">{Number(s.overall_score || 0).toFixed(0)}</td>
                   <td className="px-4 py-3 text-center">
-                    <button
-                      disabled={approving === s.id}
-                      onClick={() => approve(s.id)}
-                      className="px-3 py-1 bg-green-600 hover:bg-green-700 disabled:bg-gray-700 rounded text-sm font-semibold"
-                    >
-                      {approving === s.id ? 'Approving…' : 'Approve'}
-                    </button>
+                    <div className="flex items-center justify-center gap-2">
+                      <button
+                        disabled={approving === s.id}
+                        onClick={() => approve(s.id)}
+                        className="px-3 py-1 bg-green-600 hover:bg-green-700 disabled:bg-gray-700 rounded text-sm font-semibold"
+                      >
+                        {approving === s.id ? 'Approving...' : 'Approve'}
+                      </button>
+                      <button
+                        disabled={skipping === s.id}
+                        onClick={() => skip(s.id)}
+                        className="px-3 py-1 bg-gray-800 hover:bg-gray-700 disabled:bg-gray-700 rounded text-sm font-semibold"
+                      >
+                        {skipping === s.id ? 'Skipping...' : 'Skip'}
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -144,4 +173,3 @@ export function SignalsPage() {
     </div>
   );
 }
-

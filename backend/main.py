@@ -13,6 +13,8 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from database import SessionLocal, Strategy, TradeSignal, WatchlistAlert, WatchlistStock, init_db
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("dashboard")
 
@@ -44,6 +46,115 @@ settings_store: Dict[str, Any] = {
     "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID", ""),
 }
 
+# Ensure DB tables exist (SQLite by default, Postgres if DATABASE_URL is set on Render).
+init_db()
+
+def _db_list_watchlist() -> List[Dict[str, Any]]:
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(WatchlistStock)
+            .order_by(WatchlistStock.id.desc())
+            .all()
+        )
+        return [
+            {
+                "id": str(r.id),
+                "symbol": r.symbol,
+                "strategy_id": r.strategy_id,
+                "auto_trade": bool(r.auto_trade),
+                "status": r.status,
+                "added_date": r.added_date,
+                "last_checked": r.last_checked,
+                "last_signal": r.last_signal,
+                "last_signal_price": r.last_signal_price,
+                "quantity_to_buy": r.quantity_to_buy,
+            }
+            for r in rows
+        ]
+    finally:
+        db.close()
+
+
+def _db_upsert_watchlist(payload: dict) -> Dict[str, Any]:
+    symbol = str(payload.get("symbol", "")).upper().strip()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol required")
+    db = SessionLocal()
+    try:
+        row = db.query(WatchlistStock).filter(WatchlistStock.symbol == symbol).first()
+        if row and row.status != "removed":
+            return {"status": "exists", "symbol": symbol}
+        if not row:
+            row = WatchlistStock(symbol=symbol)
+            db.add(row)
+        row.strategy_id = str(payload.get("strategy_id") or row.strategy_id or "default")
+        row.auto_trade = bool(payload.get("auto_trade", row.auto_trade))
+        row.status = str(payload.get("status") or row.status or "active")
+        row.added_date = row.added_date or datetime.now().isoformat()
+        row.quantity_to_buy = int(payload.get("quantity_to_buy") or payload.get("quantity") or row.quantity_to_buy or 1)
+        db.commit()
+        db.refresh(row)
+        return {
+            "status": "added",
+            "item": {
+                "id": str(row.id),
+                "symbol": row.symbol,
+                "strategy_id": row.strategy_id,
+                "auto_trade": bool(row.auto_trade),
+                "status": row.status,
+                "added_date": row.added_date,
+                "last_checked": row.last_checked,
+                "last_signal": row.last_signal,
+                "last_signal_price": row.last_signal_price,
+                "quantity_to_buy": row.quantity_to_buy,
+            },
+        }
+    finally:
+        db.close()
+
+
+def _db_remove_watchlist(symbol: str) -> Dict[str, Any]:
+    sym = str(symbol).upper().strip()
+    if not sym:
+        raise HTTPException(status_code=400, detail="symbol required")
+    db = SessionLocal()
+    try:
+        row = db.query(WatchlistStock).filter(WatchlistStock.symbol == sym).first()
+        if not row or row.status == "removed":
+            return {"status": "not_found", "symbol": sym}
+        row.status = "removed"
+        db.commit()
+        return {"status": "removed", "symbol": sym}
+    finally:
+        db.close()
+
+
+def _db_insert_signal(signal_rec: Dict[str, Any]) -> None:
+    db = SessionLocal()
+    try:
+        # De-dupe by id if the caller retries.
+        existing = db.query(TradeSignal).filter(TradeSignal.id == str(signal_rec["id"])).first()
+        if existing:
+            return
+        row = TradeSignal(
+            id=str(signal_rec["id"]),
+            symbol=str(signal_rec.get("symbol") or "UNKNOWN"),
+            strategy_id=str(signal_rec.get("strategy_id") or "default"),
+            signal_type=str(signal_rec.get("signal_type") or "buy"),
+            signal_price=float(signal_rec.get("signal_price") or 0.0),
+            signal_time=str(signal_rec.get("signal_time") or datetime.now().isoformat()),
+            technical_score=float(signal_rec.get("technical_score") or 0.0),
+            news_score=float(signal_rec.get("news_score") or 0.0),
+            fundamental_score=float(signal_rec.get("fundamental_score") or 0.0),
+            risk_score=float(signal_rec.get("risk_score") or 0.0),
+            overall_score=float(signal_rec.get("overall_score") or 0.0),
+            approval_status=str(signal_rec.get("approval_status") or "pending"),
+        )
+        db.add(row)
+        db.commit()
+    finally:
+        db.close()
 class ChatMessage(BaseModel):
     message: str
 
@@ -156,6 +267,32 @@ async def buy_signal_alert(payload: dict):
         'approval_status': 'pending',
     }
     trade_signals.insert(0, signal_rec)
+    # Persist to DB so the watchlist/signals survive Render restarts (SQLite by default).
+    try:
+        _db_insert_signal(signal_rec)
+        db = SessionLocal()
+        try:
+            wl = db.query(WatchlistStock).filter(WatchlistStock.symbol == symbol).first()
+            if wl:
+                wl.last_checked = datetime.now().isoformat()
+                wl.last_signal = "buy"
+                wl.last_signal_price = float(signal_rec.get("signal_price") or 0.0)
+                db.commit()
+            db.add(
+                WatchlistAlert(
+                    symbol=symbol,
+                    alert_type="signal_alert",
+                    alert_message=f"BUY SIGNAL: {symbol}",
+                    alert_time=datetime.now().isoformat(),
+                    telegram_sent=False,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+    except Exception:
+        # Don't fail the alert endpoint if DB is unavailable.
+        pass
 
     sent = await send_telegram_alert(f"BUY SIGNAL: {symbol}\nSignal: {signal}\nTime: {datetime.now().isoformat()}")
     last_buy_alert_at[symbol] = now
@@ -224,9 +361,54 @@ async def get_order_history_api():
 
 @app.get('/strategies')
 async def get_strategies():
+    # DB-backed strategies. Falls back to seeded mock rows if the DB is empty.
+    try:
+        db = SessionLocal()
+        try:
+            rows = db.query(Strategy).order_by(Strategy.created_date.desc().nullslast()).all()
+        finally:
+            db.close()
+        if rows:
+            return [
+                {
+                    "id": r.id,
+                    "name": r.name,
+                    "symbol": r.symbol,
+                    "timeframe": r.timeframe,
+                    "status": r.status,
+                    "pnl": r.pnl,
+                    "win_rate": r.win_rate,
+                    "total_trades": 0,
+                    "equity_curve": [{"date": r.created_date or datetime.now().date().isoformat(), "value": 100000}],
+                }
+                for r in rows
+            ]
+    except Exception:
+        pass
+
     return [
-        {'id': '1', 'name': 'EMA Cross', 'symbol': 'INFY', 'timeframe': '4h', 'status': 'running', 'pnl': 8500, 'win_rate': 72, 'total_trades': 45, 'equity_curve': [{'date': '2026-05-18', 'value': 100000}]},
-        {'id': '2', 'name': 'Pine Momentum', 'symbol': 'NIFTY', 'timeframe': '1h', 'status': 'backtested', 'pnl': 4200, 'win_rate': 64, 'total_trades': 33, 'equity_curve': [{'date': '2026-05-18', 'value': 100000}]},
+        {
+            "id": "1",
+            "name": "EMA Cross",
+            "symbol": "INFY",
+            "timeframe": "4h",
+            "status": "running",
+            "pnl": 8500,
+            "win_rate": 72,
+            "total_trades": 45,
+            "equity_curve": [{"date": "2026-05-18", "value": 100000}],
+        },
+        {
+            "id": "2",
+            "name": "Pine Momentum",
+            "symbol": "NIFTY",
+            "timeframe": "1h",
+            "status": "backtested",
+            "pnl": 4200,
+            "win_rate": 64,
+            "total_trades": 33,
+            "equity_curve": [{"date": "2026-05-18", "value": 100000}],
+        },
     ]
 
 @app.get('/api/strategies')
@@ -235,14 +417,69 @@ async def get_strategies_api():
 
 @app.post('/strategy/create')
 async def create_strategy(payload: dict):
-    return {'status': 'created', 'strategy': payload}
+    # Minimal persistence layer (the agent/executor can interpret rules later).
+    strategy_id = str(payload.get("strategy_id") or payload.get("id") or uuid.uuid4())
+    name = str(payload.get("name") or "New Strategy")
+    symbol = str(payload.get("symbol") or "INFY").upper()
+    timeframe = str(payload.get("timeframe") or "4h")
+    status = str(payload.get("status") or "paused")
+    entry_rule = str(payload.get("entry_rule") or payload.get("buy_conditions") or "")
+    exit_rule = str(payload.get("exit_rule") or payload.get("sell_conditions") or "")
+    try:
+        db = SessionLocal()
+        try:
+            row = db.query(Strategy).filter(Strategy.id == strategy_id).first()
+            if not row:
+                row = Strategy(id=strategy_id, name=name, symbol=symbol, timeframe=timeframe)
+                db.add(row)
+            row.name = name
+            row.symbol = symbol
+            row.timeframe = timeframe
+            row.status = status
+            row.entry_rule = entry_rule
+            row.exit_rule = exit_rule
+            row.created_date = row.created_date or datetime.now().date().isoformat()
+            db.commit()
+        finally:
+            db.close()
+        return {"status": "created", "strategy_id": strategy_id}
+    except Exception as exc:
+        return {"status": "created", "strategy_id": strategy_id, "warning": f"db_unavailable: {exc}"}
 
 @app.delete('/strategy/{strategy_id}')
 async def delete_strategy(strategy_id: str):
+    try:
+        db = SessionLocal()
+        try:
+            row = db.query(Strategy).filter(Strategy.id == strategy_id).first()
+            if row:
+                db.delete(row)
+                db.commit()
+        finally:
+            db.close()
+    except Exception:
+        pass
     return {'status': 'deleted', 'id': strategy_id}
 
 @app.get('/strategy/{strategy_id}/metrics')
 async def metrics(strategy_id: str):
+    try:
+        db = SessionLocal()
+        try:
+            row = db.query(Strategy).filter(Strategy.id == strategy_id).first()
+        finally:
+            db.close()
+        if row:
+            return {
+                "id": row.id,
+                "sharpe": row.sharpe_ratio or 0.0,
+                "max_dd": 0.0,
+                "profit_factor": 0.0,
+                "win_rate": row.win_rate or 0.0,
+                "pnl": row.pnl or 0.0,
+            }
+    except Exception:
+        pass
     return {'id': strategy_id, 'sharpe': 1.9, 'max_dd': -8.2, 'profit_factor': 2.2}
 
 @app.post('/strategy/pinescript/generate')
@@ -293,56 +530,196 @@ async def save_settings_api(payload: dict):
 
 @app.get('/api/watchlist')
 async def api_get_watchlist():
-    return watchlist_items
+    try:
+        return _db_list_watchlist()
+    except Exception:
+        return watchlist_items
 
 @app.post('/api/watchlist/add')
 async def api_add_watchlist(payload: dict):
-    symbol = str(payload.get('symbol', '')).upper().strip()
-    if not symbol:
-        raise HTTPException(status_code=400, detail='symbol required')
-    if any(item.get('symbol') == symbol and item.get('status', 'active') != 'removed' for item in watchlist_items):
-        return {'status': 'exists', 'symbol': symbol}
-    item = {
-        'id': str(uuid.uuid4()),
-        'symbol': symbol,
-        'strategy_id': str(payload.get('strategy_id') or 'default'),
-        'auto_trade': bool(payload.get('auto_trade', False)),
-        'status': 'active',
-        'added_date': datetime.now().isoformat(),
-        'last_checked': None,
-        'last_signal': None,
-        'last_signal_price': None,
-        'quantity_to_buy': int(payload.get('quantity_to_buy') or payload.get('quantity') or 1),
-    }
-    watchlist_items.append(item)
-    return {'status': 'added', 'item': item}
+    try:
+        return _db_upsert_watchlist(payload)
+    except Exception:
+        symbol = str(payload.get('symbol', '')).upper().strip()
+        if not symbol:
+            raise HTTPException(status_code=400, detail='symbol required')
+        if any(item.get('symbol') == symbol and item.get('status', 'active') != 'removed' for item in watchlist_items):
+            return {'status': 'exists', 'symbol': symbol}
+        item = {
+            'id': str(uuid.uuid4()),
+            'symbol': symbol,
+            'strategy_id': str(payload.get('strategy_id') or 'default'),
+            'auto_trade': bool(payload.get('auto_trade', False)),
+            'status': 'active',
+            'added_date': datetime.now().isoformat(),
+            'last_checked': None,
+            'last_signal': None,
+            'last_signal_price': None,
+            'quantity_to_buy': int(payload.get('quantity_to_buy') or payload.get('quantity') or 1),
+        }
+        watchlist_items.append(item)
+        return {'status': 'added', 'item': item}
 
 @app.post('/api/watchlist/remove')
 async def api_remove_watchlist(payload: dict):
     symbol = str(payload.get('symbol', '')).upper().strip()
-    if not symbol:
-        raise HTTPException(status_code=400, detail='symbol required')
-    for item in watchlist_items:
-        if item.get('symbol') == symbol and item.get('status') != 'removed':
-            item['status'] = 'removed'
-            return {'status': 'removed', 'symbol': symbol}
-    return {'status': 'not_found', 'symbol': symbol}
+    try:
+        return _db_remove_watchlist(symbol)
+    except Exception:
+        if not symbol:
+            raise HTTPException(status_code=400, detail='symbol required')
+        for item in watchlist_items:
+            if item.get('symbol') == symbol and item.get('status') != 'removed':
+                item['status'] = 'removed'
+                return {'status': 'removed', 'symbol': symbol}
+        return {'status': 'not_found', 'symbol': symbol}
 
 @app.get('/api/signals/pending')
 async def api_pending_signals():
-    return [s for s in trade_signals if s.get('approval_status') == 'pending']
+    try:
+        db = SessionLocal()
+        try:
+            rows = (
+                db.query(TradeSignal)
+                .filter(TradeSignal.approval_status == "pending")
+                .order_by(TradeSignal.signal_time.desc())
+                .all()
+            )
+            return [
+                {
+                    "id": r.id,
+                    "symbol": r.symbol,
+                    "strategy_id": r.strategy_id,
+                    "signal_type": r.signal_type,
+                    "signal_price": r.signal_price,
+                    "signal_time": r.signal_time,
+                    "technical_score": r.technical_score,
+                    "news_score": r.news_score,
+                    "fundamental_score": r.fundamental_score,
+                    "risk_score": r.risk_score,
+                    "overall_score": r.overall_score,
+                    "approval_status": r.approval_status,
+                }
+                for r in rows
+            ]
+        finally:
+            db.close()
+    except Exception:
+        return [s for s in trade_signals if s.get('approval_status') == 'pending']
 
 @app.post('/api/signal/approve')
 async def api_approve_signal(payload: dict):
     sid = payload.get('signal_id') or payload.get('id')
     if not sid:
         raise HTTPException(status_code=400, detail='signal_id required')
-    for s in trade_signals:
-        if str(s.get('id')) == str(sid):
-            s['approval_status'] = 'approved'
-            s['approval_time'] = datetime.now().isoformat()
-            return {'status': 'approved', 'signal': s}
-    return {'status': 'not_found', 'signal_id': sid}
+    # Update DB first (source of truth), then mirror to in-memory list.
+    try:
+        db = SessionLocal()
+        try:
+            row = db.query(TradeSignal).filter(TradeSignal.id == str(sid)).first()
+            if not row:
+                return {'status': 'not_found', 'signal_id': sid}
+            row.approval_status = 'approved'
+            row.approval_time = datetime.now().isoformat()
+            row.approval_reason = str(payload.get('reason') or 'Approved in dashboard')
+            db.commit()
+            signal_out = {
+                "id": row.id,
+                "symbol": row.symbol,
+                "strategy_id": row.strategy_id,
+                "signal_type": row.signal_type,
+                "signal_price": row.signal_price,
+                "signal_time": row.signal_time,
+                "technical_score": row.technical_score,
+                "news_score": row.news_score,
+                "fundamental_score": row.fundamental_score,
+                "risk_score": row.risk_score,
+                "overall_score": row.overall_score,
+                "approval_status": row.approval_status,
+                "approval_time": row.approval_time,
+            }
+        finally:
+            db.close()
+        for s in trade_signals:
+            if str(s.get('id')) == str(sid):
+                s['approval_status'] = 'approved'
+                s['approval_time'] = datetime.now().isoformat()
+        return {'status': 'approved', 'signal': signal_out}
+    except Exception:
+        for s in trade_signals:
+            if str(s.get('id')) == str(sid):
+                s['approval_status'] = 'approved'
+                s['approval_time'] = datetime.now().isoformat()
+                return {'status': 'approved', 'signal': s}
+        return {'status': 'not_found', 'signal_id': sid}
+
+@app.post('/api/signal/skip')
+async def api_skip_signal(payload: dict):
+    sid = payload.get('signal_id') or payload.get('id')
+    if not sid:
+        raise HTTPException(status_code=400, detail='signal_id required')
+    reason = str(payload.get('reason') or 'Skipped in dashboard')
+    try:
+        db = SessionLocal()
+        try:
+            row = db.query(TradeSignal).filter(TradeSignal.id == str(sid)).first()
+            if not row:
+                return {'status': 'not_found', 'signal_id': sid}
+            row.approval_status = 'skipped'
+            row.approval_time = datetime.now().isoformat()
+            row.approval_reason = reason
+            db.commit()
+        finally:
+            db.close()
+        for s in trade_signals:
+            if str(s.get('id')) == str(sid):
+                s['approval_status'] = 'skipped'
+                s['approval_time'] = datetime.now().isoformat()
+        return {'status': 'skipped', 'signal_id': sid}
+    except Exception:
+        for s in trade_signals:
+            if str(s.get('id')) == str(sid):
+                s['approval_status'] = 'skipped'
+                s['approval_time'] = datetime.now().isoformat()
+                return {'status': 'skipped', 'signal_id': sid}
+        return {'status': 'not_found', 'signal_id': sid}
+
+# ---------------------------------------------------------------------------
+# Non-/api aliases for the "production architecture" spec (keeps UI/scripts happy)
+# ---------------------------------------------------------------------------
+
+@app.get("/watchlist")
+async def get_watchlist_alias():
+    return await api_get_watchlist()
+
+@app.post("/watchlist/add")
+async def add_watchlist_alias(payload: dict):
+    return await api_add_watchlist(payload)
+
+@app.delete("/watchlist/{symbol}")
+async def remove_watchlist_alias(symbol: str):
+    # Uses the DB helper directly (preferred), falls back to in-memory.
+    try:
+        return _db_remove_watchlist(symbol)
+    except Exception:
+        sym = str(symbol).upper().strip()
+        for item in watchlist_items:
+            if item.get("symbol") == sym and item.get("status") != "removed":
+                item["status"] = "removed"
+                return {"status": "removed", "symbol": sym}
+        return {"status": "not_found", "symbol": sym}
+
+@app.get("/signals/pending")
+async def pending_signals_alias():
+    return await api_pending_signals()
+
+@app.post("/signal/approve")
+async def approve_signal_alias(payload: dict):
+    return await api_approve_signal(payload)
+
+@app.post("/signal/skip")
+async def skip_signal_alias(payload: dict):
+    return await api_skip_signal(payload)
 
 @app.get('/api/system/health')
 async def api_system_health():
