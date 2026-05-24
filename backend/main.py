@@ -607,6 +607,117 @@ async def api_pending_signals():
     except Exception:
         return [s for s in trade_signals if s.get('approval_status') == 'pending']
 
+
+@app.get("/api/signals")
+async def api_list_signals(status: str = "pending", include_executed: bool = False):
+    """
+    List trade signals by approval status.
+
+    status: pending|approved|skipped|rejected|all
+    include_executed: when false, hides rows with order_id set (already executed).
+    """
+    status = str(status or "pending").lower().strip()
+    valid = {"pending", "approved", "skipped", "rejected", "all"}
+    if status not in valid:
+        raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {sorted(valid)}")
+
+    try:
+        db = SessionLocal()
+        try:
+            q = db.query(TradeSignal)
+            if status != "all":
+                q = q.filter(TradeSignal.approval_status == status)
+            if not include_executed:
+                q = q.filter((TradeSignal.order_id == None) | (TradeSignal.order_id == ""))  # noqa: E711
+            rows = q.order_by(TradeSignal.signal_time.desc()).all()
+            return [
+                {
+                    "id": r.id,
+                    "symbol": r.symbol,
+                    "strategy_id": r.strategy_id,
+                    "signal_type": r.signal_type,
+                    "signal_price": r.signal_price,
+                    "signal_time": r.signal_time,
+                    "technical_score": r.technical_score,
+                    "news_score": r.news_score,
+                    "fundamental_score": r.fundamental_score,
+                    "risk_score": r.risk_score,
+                    "overall_score": r.overall_score,
+                    "approval_status": r.approval_status,
+                    "approval_time": r.approval_time,
+                    "order_id": r.order_id,
+                    "execution_price": r.execution_price,
+                    "execution_time": r.execution_time,
+                }
+                for r in rows
+            ]
+        finally:
+            db.close()
+    except Exception:
+        # In-memory fallback (best-effort)
+        out = trade_signals
+        if status != "all":
+            out = [s for s in out if s.get("approval_status") == status]
+        if not include_executed:
+            out = [s for s in out if not s.get("order_id")]
+        return out
+
+
+@app.get("/api/signals/approved")
+async def api_approved_signals(include_executed: bool = False):
+    """Convenience endpoint for the trade execution agent."""
+    return await api_list_signals(status="approved", include_executed=include_executed)
+
+
+@app.post("/api/signal/mark-executed")
+async def api_mark_signal_executed(payload: dict):
+    """
+    Mark an approved signal as executed (prevents double-execution).
+
+    Payload:
+      signal_id: str
+      order_id: str
+      execution_price: float (optional)
+      broker: str (optional)
+    """
+    sid = str(payload.get("signal_id") or payload.get("id") or "").strip()
+    order_id = str(payload.get("order_id") or "").strip()
+    if not sid or not order_id:
+        raise HTTPException(status_code=400, detail="signal_id and order_id required")
+    exec_price = payload.get("execution_price")
+    try:
+        exec_price_val = float(exec_price) if exec_price is not None else None
+    except Exception:
+        exec_price_val = None
+
+    updated = False
+    try:
+        db = SessionLocal()
+        try:
+            row = db.query(TradeSignal).filter(TradeSignal.id == sid).first()
+            if not row:
+                return {"status": "not_found", "signal_id": sid}
+            row.order_id = order_id
+            row.execution_time = datetime.now().isoformat()
+            if exec_price_val is not None:
+                row.execution_price = exec_price_val
+            db.commit()
+            updated = True
+        finally:
+            db.close()
+    except Exception:
+        updated = False
+
+    for s in trade_signals:
+        if str(s.get("id")) == sid:
+            s["order_id"] = order_id
+            s["execution_time"] = datetime.now().isoformat()
+            if exec_price_val is not None:
+                s["execution_price"] = exec_price_val
+            updated = True
+
+    return {"status": "executed" if updated else "error", "signal_id": sid, "order_id": order_id}
+
 @app.post('/api/signal/approve')
 async def api_approve_signal(payload: dict):
     sid = payload.get('signal_id') or payload.get('id')
@@ -713,6 +824,10 @@ async def remove_watchlist_alias(symbol: str):
 async def pending_signals_alias():
     return await api_pending_signals()
 
+@app.get("/signals/approved")
+async def approved_signals_alias(include_executed: bool = False):
+    return await api_approved_signals(include_executed=include_executed)
+
 @app.post("/signal/approve")
 async def approve_signal_alias(payload: dict):
     return await api_approve_signal(payload)
@@ -720,6 +835,10 @@ async def approve_signal_alias(payload: dict):
 @app.post("/signal/skip")
 async def skip_signal_alias(payload: dict):
     return await api_skip_signal(payload)
+
+@app.post("/signal/mark-executed")
+async def mark_executed_alias(payload: dict):
+    return await api_mark_signal_executed(payload)
 
 @app.get('/api/system/health')
 async def api_system_health():
