@@ -13,7 +13,12 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from database import SessionLocal, Strategy, TradeSignal, WatchlistAlert, WatchlistStock, init_db
+try:
+    # When executed as a module (e.g. gunicorn/uvicorn from repo root)
+    from backend.database import SessionLocal, Strategy, TradeSignal, WatchlistAlert, WatchlistStock, init_db  # type: ignore
+except Exception:  # noqa: BLE001
+    # When executed as a script from within backend/ (python backend/main.py)
+    from database import SessionLocal, Strategy, TradeSignal, WatchlistAlert, WatchlistStock, init_db  # type: ignore
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("dashboard")
