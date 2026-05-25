@@ -1,12 +1,10 @@
 services:
   - type: web
     name: trading-dashboard
-    env: node
+    env: python
     plan: free
     buildCommand: bash build.sh
     startCommand: python backend/main.py
     envVars:
-      - key: NODE_VERSION
-        value: "18"
       - key: PORT
         value: "8000"
