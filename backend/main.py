@@ -7,7 +7,7 @@ from typing import Any, Dict, List
 
 import json
 import urllib.request
-from fastapi import FastAPI, WebSocket, HTTPException
+from fastapi import FastAPI, WebSocket, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -15,10 +15,49 @@ from pydantic import BaseModel
 
 try:
     # When executed as a module (e.g. gunicorn/uvicorn from repo root)
-    from backend.database import SessionLocal, Strategy, TradeSignal, WatchlistAlert, WatchlistStock, init_db  # type: ignore
+    from backend.database import (  # type: ignore
+        SessionLocal,
+        Strategy,
+        TradeSignal,
+        WatchlistAlert,
+        WatchlistStock,
+        Settings,
+        Position,
+        IdempotencyKey,
+        init_db,
+    )
 except Exception:  # noqa: BLE001
     # When executed as a script from within backend/ (python backend/main.py)
-    from database import SessionLocal, Strategy, TradeSignal, WatchlistAlert, WatchlistStock, init_db  # type: ignore
+    from database import (  # type: ignore
+        SessionLocal,
+        Strategy,
+        TradeSignal,
+        WatchlistAlert,
+        WatchlistStock,
+        Settings,
+        Position,
+        IdempotencyKey,
+        init_db,
+    )
+
+try:
+    from backend.brokerage.charges_engine import ChargesEngine, TradeSegment  # type: ignore
+    from backend.risk.capital_allocator import CapitalAllocator, CapitalConfig  # type: ignore
+    from backend.config.trading_config import is_trading_enabled, enable_trading, disable_trading  # type: ignore
+    from backend.execution.order_deduplication import OrderDeduplicationService  # type: ignore
+    from backend.core.event_store import build_event_store  # type: ignore
+    from backend.market_data.symbol_master_service import build_symbol_master  # type: ignore
+    from backend.brokers.upstox_broker import broker_from_env  # type: ignore
+    from backend.security.jwt_auth import load_jwt_auth  # type: ignore
+except Exception:  # noqa: BLE001
+    from brokerage.charges_engine import ChargesEngine, TradeSegment  # type: ignore
+    from risk.capital_allocator import CapitalAllocator, CapitalConfig  # type: ignore
+    from config.trading_config import is_trading_enabled, enable_trading, disable_trading  # type: ignore
+    from execution.order_deduplication import OrderDeduplicationService  # type: ignore
+    from core.event_store import build_event_store  # type: ignore
+    from market_data.symbol_master_service import build_symbol_master  # type: ignore
+    from brokers.upstox_broker import broker_from_env  # type: ignore
+    from security.jwt_auth import load_jwt_auth  # type: ignore
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("dashboard")
@@ -53,6 +92,99 @@ settings_store: Dict[str, Any] = {
 
 # Ensure DB tables exist (SQLite by default, Postgres if DATABASE_URL is set on Render).
 init_db()
+
+# Phase A foundations (safe defaults: enabled only when explicitly configured)
+JWT = load_jwt_auth()
+DEDUP = OrderDeduplicationService()
+CHARGES = ChargesEngine(min_profitability_ratio=float(os.getenv("MIN_PROFITABILITY_RATIO", "3.0")))
+CAPITAL = CapitalAllocator(
+    CapitalConfig(
+        max_capital_deployment=float(os.getenv("MAX_CAPITAL_DEPLOYMENT", "0.70")),
+        risk_per_trade=float(os.getenv("RISK_PER_TRADE", "0.01")),
+        max_position_size=float(os.getenv("MAX_POSITION_SIZE_FRAC", "0.10")),
+        max_open_positions=int(os.getenv("MAX_OPEN_POSITIONS", "8")),
+        emergency_reserve=float(os.getenv("EMERGENCY_RESERVE", "0.20")),
+    )
+)
+SYMBOL_MASTER = build_symbol_master()
+EVENTS = build_event_store(os.environ.get("DATABASE_URL", "sqlite:///./trading_dashboard.db"))
+
+# Broker is optional; when missing token or feature flag is off, we keep paper trading behavior.
+ENABLE_LIVE_BROKER = os.getenv("ENABLE_LIVE_BROKER", "").strip().lower() in {"1", "true", "yes", "on"}
+UPSTOX = broker_from_env(symbol_master=SYMBOL_MASTER) if ENABLE_LIVE_BROKER else None
+
+
+def _auth_required() -> bool:
+    return JWT is not None
+
+
+def _require_user(authorization: str | None) -> Dict[str, Any]:
+    if not JWT:
+        return {"sub": "anonymous", "role": "admin"}
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    parts = authorization.strip().split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Invalid Authorization header")
+    try:
+        return JWT.verify_token(parts[1])
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=401, detail=str(exc))
+
+
+def _require_admin(user: Dict[str, Any]) -> None:
+    if str(user.get("role") or "") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+
+def _require_admin_access(authorization: str | None, admin_key: str | None) -> Dict[str, Any]:
+    """
+    Admin gate:
+    - If JWT is enabled, require Bearer token with role=admin.
+    - If JWT is disabled, require X-Admin-Key header matching ADMIN_API_KEY env var.
+    """
+    if JWT:
+        user = _require_user(authorization)
+        _require_admin(user)
+        return user
+    expected = os.getenv("ADMIN_API_KEY", "").strip()
+    if not expected:
+        raise HTTPException(status_code=500, detail="ADMIN_API_KEY not configured (and JWT disabled)")
+    if not admin_key or admin_key.strip() != expected:
+        raise HTTPException(status_code=403, detail="Invalid X-Admin-Key")
+    return {"sub": "admin-key", "role": "admin"}
+
+
+def _db_get_setting(key: str, default: str | None = None) -> str | None:
+    db = SessionLocal()
+    try:
+        row = db.query(Settings).filter(Settings.key == key).first()
+        if not row:
+            return default
+        return row.value
+    finally:
+        db.close()
+
+
+def _db_set_setting(key: str, value: str) -> None:
+    db = SessionLocal()
+    try:
+        row = db.query(Settings).filter(Settings.key == key).first()
+        if not row:
+            row = Settings(key=key, value=value)
+            db.add(row)
+        else:
+            row.value = value
+        db.commit()
+    finally:
+        db.close()
+
+
+def _kill_switch_enabled() -> bool:
+    v = _db_get_setting("TRADING_ENABLED")
+    if v is None or str(v).strip() == "":
+        return is_trading_enabled()
+    return str(v).strip().lower() in {"1", "true", "yes", "on"}
 
 def _db_list_watchlist() -> List[Dict[str, Any]]:
     db = SessionLocal()
@@ -327,6 +459,36 @@ async def send_telegram_alert(text: str) -> bool:
 
 @app.get('/positions')
 async def get_positions():
+    # Prefer DB-backed position snapshots if present (survive restarts).
+    try:
+        db = SessionLocal()
+        try:
+            rows = db.query(Position).all()
+        finally:
+            db.close()
+        if rows:
+            out: List[Dict[str, Any]] = []
+            for r in rows:
+                qty = float(r.quantity or 0)
+                entry = float(r.avg_entry_price or 0)
+                cur = float(r.current_price or 0) or entry
+                pnl = (cur - entry) * qty if qty else 0.0
+                pnl_pct = (pnl / (abs(qty) * entry) * 100) if qty and entry else 0.0
+                out.append(
+                    {
+                        "symbol": r.symbol,
+                        "qty": qty,
+                        "entry_price": entry,
+                        "current_price": cur,
+                        "pnl": pnl,
+                        "pnl_pct": pnl_pct,
+                        "broker": r.broker,
+                        "last_updated": r.last_updated,
+                    }
+                )
+            return out
+    except Exception:
+        pass
     return positions
 
 @app.get('/api/positions')
@@ -336,21 +498,236 @@ async def get_positions_api():
 @app.delete('/positions/{symbol}')
 async def close_position(symbol: str):
     global positions
-    positions = [p for p in positions if p['symbol'] != symbol.upper()]
+    sym = symbol.upper().strip()
+    positions = [p for p in positions if p['symbol'] != sym]
+    # Best-effort DB cleanup (set qty to 0).
+    try:
+        db = SessionLocal()
+        try:
+            row = db.query(Position).filter(Position.symbol == sym).first()
+            if row:
+                row.quantity = 0
+                row.unrealized_pnl = 0.0
+                row.last_updated = datetime.now().isoformat()
+                db.commit()
+        finally:
+            db.close()
+    except Exception:
+        pass
     return {'status': 'ok'}
 
 @app.post('/trade')
 async def place_trade(data: dict):
-    symbol = str(data.get('symbol', '')).upper()
-    side = data.get('side', 'buy')
-    qty = float(data.get('quantity', 0))
-    price = float(data.get('price', 0))
-    if not symbol or qty <= 0 or price <= 0:
+    if not _kill_switch_enabled():
+        raise HTTPException(status_code=403, detail="Trading disabled (kill switch active)")
+
+    symbol = str(data.get('symbol', '')).upper().strip()
+    side = str(data.get('side', 'buy')).lower().strip()
+    qty_req = float(data.get('quantity', 0) or 0)
+    price = float(data.get('price', 0) or 0)
+
+    if side not in {"buy", "sell"}:
+        raise HTTPException(status_code=400, detail="side must be buy or sell")
+    if not symbol or qty_req <= 0 or price <= 0:
         raise HTTPException(status_code=400, detail='Invalid order payload')
-    o = {'id': str(uuid.uuid4()), 'symbol': symbol, 'side': side, 'qty': qty, 'price': price, 'status': 'filled', 'timestamp': datetime.now().isoformat()}
+
+    sl_pct = float(os.getenv("DEFAULT_STOP_LOSS_PCT", "2.0"))
+    tp_pct = float(os.getenv("DEFAULT_TAKE_PROFIT_PCT", "5.0"))
+
+    stop_loss = data.get("stop_loss")
+    take_profit = data.get("take_profit") or data.get("expected_exit_price")
+
+    try:
+        stop_loss = float(stop_loss) if stop_loss is not None and str(stop_loss).strip() != "" else None
+    except Exception:
+        stop_loss = None
+    try:
+        take_profit = float(take_profit) if take_profit is not None and str(take_profit).strip() != "" else None
+    except Exception:
+        take_profit = None
+
+    if stop_loss is None:
+        stop_loss = price * (1.0 - sl_pct / 100.0) if side == "buy" else price * (1.0 + sl_pct / 100.0)
+    if take_profit is None:
+        take_profit = price * (1.0 + tp_pct / 100.0) if side == "buy" else price * (1.0 - tp_pct / 100.0)
+
+    # Persistent idempotency protection (client_order_id).
+    client_order_id = str(data.get("client_order_id") or "").strip()
+    if not client_order_id:
+        client_order_id = DEDUP.generate_client_order_id(symbol, side, int(qty_req))
+
+    db = SessionLocal()
+    try:
+        existing = db.query(IdempotencyKey).filter(IdempotencyKey.client_order_id == client_order_id).first()
+        if existing:
+            if (existing.status or "") == "completed" and existing.broker_order_id:
+                return {
+                    "status": "duplicate",
+                    "client_order_id": client_order_id,
+                    "order_id": existing.broker_order_id,
+                    "message": "Order already completed for this client_order_id",
+                }
+            raise HTTPException(status_code=409, detail="Duplicate order detected (client_order_id already registered)")
+
+        row = IdempotencyKey(
+            client_order_id=client_order_id,
+            broker=str(data.get("broker") or settings_store.get("broker") or "upstox"),
+            status="pending",
+            broker_order_id=None,
+            request_payload=json.dumps(data),
+            created_at=datetime.now().isoformat(),
+        )
+        db.add(row)
+        db.commit()
+    finally:
+        db.close()
+
+    def _calc_exposure_and_count() -> tuple[float, int]:
+        db2 = SessionLocal()
+        try:
+            rows = db2.query(Position).all()
+            if rows:
+                exposure = 0.0
+                count = 0
+                for r in rows:
+                    q = float(r.quantity or 0)
+                    cur = float(r.current_price or 0) or float(r.avg_entry_price or 0)
+                    if q != 0:
+                        count += 1
+                        exposure += abs(q) * cur
+                return exposure, count
+        except Exception:
+            pass
+        finally:
+            db2.close()
+
+        exposure = 0.0
+        count = 0
+        for p in positions:
+            q = float(p.get("qty") or 0)
+            cur = float(p.get("current_price") or 0)
+            if q != 0:
+                count += 1
+                exposure += abs(q) * cur
+        return exposure, count
+
+    # Institutional capital allocation / reserve enforcement (default ON).
+    enforce_capital = os.getenv("ENFORCE_CAPITAL_ALLOCATOR", "true").strip().lower() in {"1", "true", "yes", "on"}
+    if enforce_capital:
+        bal_raw = _db_get_setting("ACCOUNT_BALANCE", "") or os.getenv("DEFAULT_ACCOUNT_BALANCE", "100000")
+        account_balance = float(bal_raw or 100000)
+        current_exposure, open_positions = _calc_exposure_and_count()
+        allocation = CAPITAL.calculate_position_size(
+            account_balance=account_balance,
+            entry_price=price,
+            stop_loss_price=float(stop_loss),
+            current_exposure=current_exposure,
+            open_positions=open_positions,
+        )
+        if not allocation.get("allowed"):
+            raise HTTPException(status_code=400, detail=f"CapitalAllocator reject: {allocation.get('reason')}")
+        qty_allowed = int(allocation.get("quantity") or 0)
+        qty = min(int(qty_req), qty_allowed)
+        if qty <= 0:
+            raise HTTPException(status_code=400, detail="CapitalAllocator sized quantity to 0")
+    else:
+        qty = int(qty_req)
+
+    # Charges profitability filter (default ON).
+    enforce_charges = os.getenv("ENFORCE_CHARGES_FILTER", "true").strip().lower() in {"1", "true", "yes", "on"}
+    if enforce_charges and take_profit is not None and side == "buy":
+        segment = str(data.get("trade_segment") or "intraday").lower().strip()
+        seg = TradeSegment.delivery if segment == "delivery" else TradeSegment.intraday
+        charges = CHARGES.calculate_charges(seg, buy_price=price, sell_price=float(take_profit), quantity=int(qty), using_api=True)
+        if not charges.get("should_execute", True):
+            EVENTS.store_event(
+                "trade_rejected_charges",
+                {"symbol": symbol, "side": side, "qty": qty, "price": price, "take_profit": take_profit, "charges": charges},
+                source="dashboard",
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unprofitable trade (profit ratio {charges.get('profitability_ratio')}x; need >= {CHARGES.min_profitability_ratio}x).",
+            )
+
+    mode = str(data.get("mode") or data.get("trading_mode") or settings_store.get("trading_mode") or "paper").lower().strip()
+    broker_order_id: str
+    status: str
+
+    # Live execution is only enabled when ENABLE_LIVE_BROKER is set AND UPSTOX token is present.
+    if mode == "live" and UPSTOX:
+        try:
+            resp = await UPSTOX.place_order(
+                symbol=symbol,
+                side=side,
+                quantity=int(qty),
+                order_type=str(data.get("order_type") or "MARKET").upper(),
+                price=price if str(data.get("order_type") or "MARKET").upper() == "LIMIT" else None,
+                stop_loss=float(stop_loss),
+                take_profit=float(take_profit) if take_profit is not None else None,
+            )
+            broker_order_id = str(resp.get("data", {}).get("order_id") or resp.get("order_id") or uuid.uuid4())
+            status = "submitted"
+        except Exception as exc:  # noqa: BLE001
+            EVENTS.store_event("trade_live_error", {"symbol": symbol, "error": str(exc)}, source="dashboard")
+            raise HTTPException(status_code=502, detail=f"Live broker error: {exc}")
+    else:
+        broker_order_id = str(uuid.uuid4())
+        status = "filled"
+
+    o = {
+        'id': broker_order_id,
+        'client_order_id': client_order_id,
+        'symbol': symbol,
+        'side': side,
+        'qty': qty,
+        'price': price,
+        'stop_loss': float(stop_loss),
+        'take_profit': float(take_profit) if take_profit is not None else None,
+        'mode': mode,
+        'status': status,
+        'timestamp': datetime.now().isoformat(),
+    }
     order_history.insert(0, o)
-    positions.append({'symbol': symbol, 'qty': qty, 'entry_price': price, 'current_price': price, 'pnl': 0, 'pnl_pct': 0})
-    return {'status': 'success', 'order_id': o['id']}
+
+    if side == "buy":
+        positions.append({'symbol': symbol, 'qty': qty, 'entry_price': price, 'current_price': price, 'pnl': 0, 'pnl_pct': 0})
+
+    # Persist position snapshot (best-effort; keeps DB-based portfolio stable across restarts).
+    try:
+        db3 = SessionLocal()
+        try:
+            rowp = db3.query(Position).filter(Position.broker == "upstox", Position.symbol == symbol).first()
+            if not rowp:
+                rowp = Position(broker="upstox", symbol=symbol)
+                db3.add(rowp)
+            rowp.side = "long" if side == "buy" else "short"
+            rowp.quantity = int(rowp.quantity or 0) + (int(qty) if side == "buy" else -int(qty))
+            rowp.avg_entry_price = float(price)
+            rowp.current_price = float(price)
+            rowp.last_updated = datetime.now().isoformat()
+            db3.commit()
+        finally:
+            db3.close()
+    except Exception:
+        pass
+
+    # Mark idempotency completed.
+    try:
+        db4 = SessionLocal()
+        try:
+            row = db4.query(IdempotencyKey).filter(IdempotencyKey.client_order_id == client_order_id).first()
+            if row:
+                row.status = "completed"
+                row.broker_order_id = broker_order_id
+                db4.commit()
+        finally:
+            db4.close()
+    except Exception:
+        pass
+
+    EVENTS.store_event("trade_placed", o, source="dashboard")
+    return {'status': 'success', 'order_id': broker_order_id, 'client_order_id': client_order_id, 'mode': mode}
 
 @app.post('/api/trade')
 async def place_trade_api(data: dict):
@@ -528,6 +905,87 @@ async def save_settings(payload: dict):
 @app.post('/api/settings')
 async def save_settings_api(payload: dict):
     return await save_settings(payload)
+
+# ---------------------------------------------------------------------------
+# Phase A: Institutional infra endpoints (safe defaults; admin-gated where needed)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/kill-switch")
+async def api_kill_switch_state():
+    enabled = _kill_switch_enabled()
+    return {"trading_enabled": bool(enabled), "auth_required": _auth_required()}
+
+@app.post("/api/kill-switch")
+async def api_kill_switch_toggle(
+    payload: dict,
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    admin_key: str | None = Header(default=None, alias="X-Admin-Key"),
+):
+    _require_admin_access(authorization, admin_key)
+    enabled = bool(payload.get("enabled"))
+    _db_set_setting("TRADING_ENABLED", "true" if enabled else "false")
+    if enabled:
+        enable_trading()
+    else:
+        disable_trading()
+    EVENTS.store_event("kill_switch_toggled", {"enabled": enabled}, source="dashboard")
+    return {"trading_enabled": enabled}
+
+@app.post("/api/calculate-charges")
+async def api_calculate_charges(payload: dict):
+    segment = str(payload.get("segment") or "intraday").lower().strip()
+    seg = TradeSegment.delivery if segment == "delivery" else TradeSegment.intraday
+    buy_price = float(payload.get("buy_price") or 0)
+    sell_price = float(payload.get("sell_price") or 0)
+    quantity = int(payload.get("quantity") or 0)
+    if buy_price <= 0 or sell_price <= 0 or quantity <= 0:
+        raise HTTPException(status_code=400, detail="buy_price, sell_price, quantity required")
+    return CHARGES.calculate_charges(seg, buy_price=buy_price, sell_price=sell_price, quantity=quantity, using_api=True)
+
+@app.get("/api/events")
+async def api_events(event_type: str | None = None, limit: int = 100):
+    limit = max(1, min(int(limit or 100), 500))
+    return {"events": EVENTS.get_events(event_type=event_type, limit=limit)}
+
+@app.post("/api/symbol-master/refresh")
+async def api_symbol_master_refresh(
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    admin_key: str | None = Header(default=None, alias="X-Admin-Key"),
+):
+    _require_admin_access(authorization, admin_key)
+    # NOTE: On Render, filesystem is ephemeral unless you mount a disk.
+    try:
+        out = await SYMBOL_MASTER.download_and_refresh()
+        EVENTS.store_event("symbol_master_refreshed", out, source="dashboard")
+        return out
+    except Exception as exc:  # noqa: BLE001
+        EVENTS.store_event("symbol_master_refresh_failed", {"error": str(exc)}, source="dashboard")
+        raise HTTPException(status_code=502, detail=f"symbol master refresh failed: {exc}")
+
+@app.get("/api/symbol-master/search")
+async def api_symbol_master_search(q: str, exchange: str = "NSE", limit: int = 10):
+    limit = max(1, min(int(limit or 10), 50))
+    return {"results": SYMBOL_MASTER.search_symbols(q, exchange=exchange, limit=limit)}
+
+@app.get("/api/broker/upstox/status")
+async def api_upstox_status():
+    return {
+        "enabled": bool(ENABLE_LIVE_BROKER),
+        "token_present": bool(os.getenv("UPSTOX_ACCESS_TOKEN", "").strip()),
+        "client_ready": UPSTOX is not None,
+    }
+
+@app.get("/api/broker/upstox/profile")
+async def api_upstox_profile():
+    if not UPSTOX:
+        raise HTTPException(status_code=400, detail="Upstox broker not enabled (set ENABLE_LIVE_BROKER + UPSTOX_ACCESS_TOKEN)")
+    return await UPSTOX.get_profile()
+
+@app.get("/api/broker/upstox/funds")
+async def api_upstox_funds():
+    if not UPSTOX:
+        raise HTTPException(status_code=400, detail="Upstox broker not enabled (set ENABLE_LIVE_BROKER + UPSTOX_ACCESS_TOKEN)")
+    return await UPSTOX.get_funds_and_margin()
 
 # ---------------------------------------------------------------------------
 # Watchlist + signal approval endpoints (used by the extra scripts / UI file)
@@ -851,16 +1309,20 @@ async def api_system_health():
     return {
         'timestamp': datetime.now().isoformat(),
         'ollama_status': 'unknown',
-        'broker_status': 'unknown',
+        'broker_status': 'enabled' if UPSTOX else ('disabled' if ENABLE_LIVE_BROKER else 'paper'),
         'agents_online': len(agent_states),
         'alert_cooldown_seconds': ALERT_COOLDOWN_SECONDS,
+        'trading_enabled': _kill_switch_enabled(),
+        'auth_required': _auth_required(),
+        'enforce_charges_filter': os.getenv("ENFORCE_CHARGES_FILTER", "true").strip().lower() in {"1", "true", "yes", "on"},
+        'enforce_capital_allocator': os.getenv("ENFORCE_CAPITAL_ALLOCATOR", "true").strip().lower() in {"1", "true", "yes", "on"},
     }
 
 @app.get('/api/portfolio')
 async def api_portfolio():
     total_value = 0.0
     total_pnl = 0.0
-    for p in positions:
+    for p in await get_positions():
         qty = float(p.get('qty') or 0)
         cur = float(p.get('current_price') or 0)
         total_value += qty * cur

@@ -240,6 +240,46 @@ class TradeSignal(Base):
     )
 
 
+class IdempotencyKey(Base):
+    """
+    Persistent idempotency store for broker orders.
+
+    This prevents accidental duplicate orders when clients retry a request.
+    """
+
+    __tablename__ = "idempotency_keys"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    client_order_id = Column(String(80), unique=True, index=True, nullable=False)
+    broker = Column(String(50), default="upstox")
+    status = Column(String(30), default="pending")  # pending | completed | failed
+    broker_order_id = Column(String(80), nullable=True)
+    request_payload = Column(Text, nullable=True)
+    created_at = Column(String(50), nullable=True)
+
+
+class Position(Base):
+    """Centralized position snapshots (single source of truth for the dashboard)."""
+
+    __tablename__ = "positions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    broker = Column(String(50), default="upstox", index=True)
+    symbol = Column(String(32), index=True, nullable=False)
+    side = Column(String(10), default="long")  # long | short
+    quantity = Column(Integer, default=0)
+    avg_entry_price = Column(Float, default=0.0)
+    current_price = Column(Float, default=0.0)
+    unrealized_pnl = Column(Float, default=0.0)
+    realized_pnl = Column(Float, default=0.0)
+    last_updated = Column(String(50), nullable=True)
+
+    __table_args__ = (
+        Index("ix_positions_symbol", "symbol"),
+        Index("ix_positions_broker_symbol", "broker", "symbol"),
+    )
+
+
 class WatchlistAlert(Base):
     """Alerts emitted by agents and optionally sent to Telegram."""
 

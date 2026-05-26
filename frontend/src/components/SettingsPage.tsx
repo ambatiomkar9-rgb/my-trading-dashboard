@@ -33,6 +33,9 @@ export function SettingsPage() {
 
   const [saved, setSaved] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [killEnabled, setKillEnabled] = useState<boolean | null>(null);
+  const [adminKey, setAdminKey] = useState<string>(() => localStorage.getItem('admin_api_key') || '');
+  const [killBusy, setKillBusy] = useState(false);
 
   const safeJson = async (res: Response) => {
     const text = await res.text();
@@ -51,6 +54,12 @@ export function SettingsPage() {
         if (res.ok && data && typeof data === 'object') {
           setSettings((prev) => ({ ...prev, ...data }));
         }
+
+        const ks = await fetch(`${API_URL}/api/kill-switch`);
+        const ksData = await safeJson(ks);
+        if (ks.ok && typeof ksData?.trading_enabled === 'boolean') {
+          setKillEnabled(ksData.trading_enabled);
+        }
       } catch {
         // ignore; keep defaults
       } finally {
@@ -58,6 +67,34 @@ export function SettingsPage() {
       }
     })();
   }, []);
+
+  useEffect(() => {
+    localStorage.setItem('admin_api_key', adminKey);
+  }, [adminKey]);
+
+  const toggleKillSwitch = async (enabled: boolean) => {
+    setKillBusy(true);
+    try {
+      const res = await fetch(`${API_URL}/api/kill-switch`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(adminKey ? { 'X-Admin-Key': adminKey } : {}),
+        },
+        body: JSON.stringify({ enabled }),
+      });
+      const data = await safeJson(res);
+      if (!res.ok) {
+        throw new Error(String(data?.detail || data?.raw || `HTTP ${res.status}`));
+      }
+      setKillEnabled(Boolean(data?.trading_enabled));
+    } catch (error) {
+      console.error('Kill switch update failed:', error);
+      alert('Kill switch update failed (check ADMIN_API_KEY / auth settings).');
+    } finally {
+      setKillBusy(false);
+    }
+  };
 
   const handleSave = async () => {
     try {
@@ -176,6 +213,44 @@ export function SettingsPage() {
             />
             <span className="text-red-400">LIVE TRADING (Real money)</span>
           </label>
+        </div>
+      </section>
+
+      <section className="mb-8 bg-gray-900 p-6 rounded-lg">
+        <h2 className="text-xl font-bold mb-4">Kill Switch</h2>
+        <div className="text-sm text-gray-400 mb-3">
+          If JWT auth is disabled on the server, you must set `ADMIN_API_KEY` on Render and enter it here.
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm mb-2">Admin Key (X-Admin-Key)</label>
+            <input
+              type="password"
+              value={adminKey}
+              onChange={(e) => setAdminKey(e.target.value)}
+              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2"
+              placeholder="ADMIN_API_KEY"
+            />
+          </div>
+          <div className="flex items-end gap-2">
+            <button
+              disabled={killBusy}
+              onClick={() => toggleKillSwitch(true)}
+              className="px-4 py-2 bg-green-600 rounded hover:bg-green-700 disabled:bg-gray-700"
+            >
+              Enable
+            </button>
+            <button
+              disabled={killBusy}
+              onClick={() => toggleKillSwitch(false)}
+              className="px-4 py-2 bg-red-600 rounded hover:bg-red-700 disabled:bg-gray-700"
+            >
+              Disable
+            </button>
+            <div className="text-sm font-semibold">
+              {killEnabled === null ? 'Unknown' : killEnabled ? 'ACTIVE' : 'DISABLED'}
+            </div>
+          </div>
         </div>
       </section>
 
