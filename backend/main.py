@@ -26,7 +26,7 @@ try:
         IdempotencyKey,
         init_db,
     )
-except Exception:  # noqa: BLE001
+except ModuleNotFoundError:  # noqa: BLE001
     # When executed as a script from within backend/ (python backend/main.py)
     from database import (  # type: ignore
         SessionLocal,
@@ -49,7 +49,7 @@ try:
     from backend.market_data.symbol_master_service import build_symbol_master  # type: ignore
     from backend.brokers.upstox_broker import broker_from_env  # type: ignore
     from backend.security.jwt_auth import load_jwt_auth  # type: ignore
-except Exception:  # noqa: BLE001
+except ModuleNotFoundError:  # noqa: BLE001
     from brokerage.charges_engine import ChargesEngine, TradeSegment  # type: ignore
     from risk.capital_allocator import CapitalAllocator, CapitalConfig  # type: ignore
     from config.trading_config import is_trading_enabled, enable_trading, disable_trading  # type: ignore

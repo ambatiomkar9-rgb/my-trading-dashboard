@@ -10,7 +10,7 @@ import httpx
 try:
     # When executed as a module (repo root in sys.path)
     from backend.market_data.symbol_master_service import SymbolMasterService, build_symbol_master  # type: ignore
-except Exception:  # noqa: BLE001
+except ModuleNotFoundError:  # noqa: BLE001
     # When executed from within backend/
     from market_data.symbol_master_service import SymbolMasterService, build_symbol_master  # type: ignore
 
