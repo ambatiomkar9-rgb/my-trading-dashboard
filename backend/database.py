@@ -14,6 +14,7 @@ from sqlalchemy import (
     Index,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.exc import OperationalError
 
 # ─── Database URL ────────────────────────────────────────────────────────────
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./trading_dashboard.db")
@@ -297,4 +298,13 @@ class WatchlistAlert(Base):
 
 def init_db() -> None:
     """Create all tables if they don't exist (safe to call on startup)."""
-    Base.metadata.create_all(bind=engine)
+    try:
+        Base.metadata.create_all(bind=engine)
+    except OperationalError as exc:
+        # SQLite in particular can raise "index ... already exists" if schema evolved
+        # across deploys and SQLAlchemy's index existence detection is out of sync.
+        # This dashboard can tolerate missing/extra indexes; prefer booting.
+        msg = str(exc).lower()
+        if DATABASE_URL.startswith("sqlite") and "index" in msg and "already exists" in msg:
+            return
+        raise
