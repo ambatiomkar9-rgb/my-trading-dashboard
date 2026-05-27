@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -34,6 +34,9 @@ class EventStore:
     """
 
     db_url: str
+    # With slots=True, we must declare any attributes we set in __post_init__.
+    engine: Any = field(init=False, repr=False)
+    Session: Any = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         connect_args: Dict[str, Any] = {}
@@ -90,4 +93,3 @@ def build_event_store(default_db_url: str) -> EventStore:
     if db_url.startswith("postgres://"):
         db_url = db_url.replace("postgres://", "postgresql://", 1)
     return EventStore(db_url=db_url)
-

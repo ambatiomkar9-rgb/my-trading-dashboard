@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 import httpx
@@ -36,6 +36,8 @@ class UpstoxBroker:
     connect_timeout_sec: float = 10.0
     max_retries: int = 3
     symbol_master: Optional[SymbolMasterService] = None
+    # With slots=True, we must declare attributes we set in __post_init__.
+    client: httpx.AsyncClient = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.client = httpx.AsyncClient(
