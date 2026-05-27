@@ -44,7 +44,8 @@ class AgentState(Base):
     __tablename__ = "agent_states"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    agent_id = Column(String(100), unique=True, index=True, nullable=False)
+    # Keep this unique, but avoid double-defining an index with the same name across upgrades.
+    agent_id = Column(String(100), unique=True, nullable=False)
     status = Column(String(50), default="offline")  # online | idle | processing | error
     task = Column(String(500), default="Waiting...")
     progress = Column(Integer, default=0)  # 0-100
@@ -53,9 +54,9 @@ class AgentState(Base):
     memory_mb = Column(Float, default=0.0)
     timestamp = Column(String(50), nullable=True)
 
-    __table_args__ = (
-        Index("ix_agent_states_agent_id", "agent_id"),
-    )
+    # NOTE: Do not define an explicit Index for agent_id here.
+    # The unique constraint on agent_id is sufficient for lookups and avoids
+    # "index ... already exists" errors on SQLite when schemas evolve.
 
 
 class Strategy(Base):
