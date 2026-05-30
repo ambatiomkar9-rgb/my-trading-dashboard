@@ -22,6 +22,9 @@ class BrokerAdapter(Protocol):
     async def get_balance(self) -> Dict[str, Any]:
         """Return account balance payload."""
 
+    async def get_positions(self) -> List[Dict[str, Any]]:
+        """Return list of current positions."""
+
     async def place_order(self, order: OrderRequest) -> ExecutionResult:
         """Place order and return normalized result."""
 
@@ -66,6 +69,15 @@ class BinanceCcxtAdapter:
     async def get_balance(self) -> Dict[str, Any]:
         ex = await self._ensure_exchange()
         return await ex.fetch_balance()
+
+    async def get_positions(self) -> List[Dict[str, Any]]:
+        ex = await self._ensure_exchange()
+        # fetch_positions is available in some CCXT exchanges
+        if hasattr(ex, 'fetch_positions'):
+            return await ex.fetch_positions()
+        # Fallback to fetch_balance and filter non-zero
+        balance = await ex.fetch_balance()
+        return [{"symbol": k, "quantity": v["total"]} for k, v in balance.get("total", {}).items() if v["total"] > 0]
 
     async def place_order(self, order: OrderRequest) -> ExecutionResult:
         ex = await self._ensure_exchange()
@@ -127,6 +139,12 @@ class AlpacaAdapter:
                 response.raise_for_status()
                 return await response.json()
 
+    async def get_positions(self) -> List[Dict[str, Any]]:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{self._url}/v2/positions", headers=self._headers()) as response:
+                response.raise_for_status()
+                return await response.json()
+
     async def place_order(self, order: OrderRequest) -> ExecutionResult:
         payload = {
             "symbol": order.symbol.replace("/", ""),
@@ -176,6 +194,9 @@ class UpstoxAdapter:
         # Placeholder: return unknown. BrokerRouter balance guard will not block
         # when available cash cannot be inferred.
         return {"available": None, "message": "Upstox balance not implemented"}
+
+    async def get_positions(self) -> List[Dict[str, Any]]:
+        return []
 
     async def place_order(self, order: OrderRequest) -> ExecutionResult:
         token = (self.config.credentials.passphrase or "").strip()
@@ -236,6 +257,14 @@ class OandaAdapter:
             async with session.get(f"{self._url}/v3/accounts/{account_id}/summary", headers=self._headers()) as response:
                 response.raise_for_status()
                 return await response.json()
+
+    async def get_positions(self) -> List[Dict[str, Any]]:
+        account_id = self.config.credentials.account_id or ""
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{self._url}/v3/accounts/{account_id}/positions", headers=self._headers()) as response:
+                response.raise_for_status()
+                data = await response.json()
+                return data.get("positions", [])
 
     async def place_order(self, order: OrderRequest) -> ExecutionResult:
         account_id = self.config.credentials.account_id or ""
@@ -359,6 +388,13 @@ class BrokerRouter:
         if not adapter:
             return {"status": "unknown", "message": "Unsupported broker"}
         return await adapter.fetch_order(order_id=order_id, symbol=symbol)
+
+    async def get_positions(self, broker: str) -> List[Dict[str, Any]]:
+        """Fetch current positions from selected broker."""
+        adapter = self.adapters.get(broker.lower())
+        if not adapter:
+            return []
+        return await adapter.get_positions()
 
     async def _check_balance(self, adapter: BrokerAdapter, order: OrderRequest) -> tuple[bool, str]:
         """Balance check guard before order placement."""

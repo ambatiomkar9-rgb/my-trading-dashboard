@@ -7,7 +7,7 @@ from dataclasses import asdict
 from typing import Dict, Optional
 
 from trading_system.agents.risk_guardian import CorrelationContext, RiskGuardian
-from trading_system.config.models import ExecutionResult, OrderRequest, RiskDecision, TradingMode
+from trading_system.config.models import ExecutionResult, OrderRequest, OrderState, RiskDecision, TradingMode
 from trading_system.events.event_bus import AsyncEventBus
 from trading_system.events.event_types import EventType, build_event
 from trading_system.execution.live_approval import LiveApprovalManager
@@ -22,6 +22,18 @@ logger = logging.getLogger(__name__)
 
 class ExecutionEngine:
     """Risk-gated execution coordinator conforming to HERMES v5.2."""
+
+    VALID_TRANSITIONS = {
+        OrderState.CREATED: [OrderState.RISK_APPROVED, OrderState.FAILED],
+        OrderState.RISK_APPROVED: [OrderState.SUBMITTED, OrderState.CANCELLED],
+        OrderState.SUBMITTED: [OrderState.ACKNOWLEDGED, OrderState.REJECTED, OrderState.CANCEL_PENDING],
+        OrderState.ACKNOWLEDGED: [OrderState.PARTIALLY_FILLED, OrderState.FILLED, OrderState.MODIFIED, OrderState.CANCEL_PENDING, OrderState.EXPIRED],
+        OrderState.PARTIALLY_FILLED: [OrderState.FILLED, OrderState.PARTIALLY_FILLED, OrderState.CANCEL_PENDING, OrderState.EXPIRED],
+        OrderState.MODIFIED: [OrderState.ACKNOWLEDGED, OrderState.REJECTED],
+        OrderState.CANCEL_PENDING: [OrderState.CANCELLED, OrderState.FILLED, OrderState.REJECTED],
+    }
+    
+    TERMINAL_STATES = [OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED, OrderState.EXPIRED, OrderState.FAILED]
 
     def __init__(
         self,
@@ -49,6 +61,13 @@ class ExecutionEngine:
             TradingMode.LIVE.value: 0.0,
         }
         self._register_event_handlers()
+
+    def _validate_transition(self, current: OrderState, target: OrderState) -> bool:
+        """Enforce transition rules from Task 4.4."""
+        if current in self.TERMINAL_STATES:
+            return False
+        allowed = self.VALID_TRANSITIONS.get(current, [])
+        return target in allowed
 
     def _register_event_handlers(self) -> None:
         """Subscribe to HERMES v5.2 execution streams."""

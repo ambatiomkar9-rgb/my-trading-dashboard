@@ -197,3 +197,5 @@ class DependencyContainer:
     execution_engine: object
     boss_agent: object
     live_approval_manager: object
+    audit_memory: Optional[object] = None
+    reconciliation_engine: Optional[object] = None

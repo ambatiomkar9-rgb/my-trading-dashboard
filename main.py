@@ -38,9 +38,11 @@ from trading_system.execution.persistent_live_approval import PersistentLiveAppr
 from trading_system.execution.kill_switch import KillSwitch
 from trading_system.execution.live_executor import LiveExecutor
 from trading_system.execution.paper_executor import PaperExecutor
+from trading_system.execution.reconciliation_engine import ReconciliationEngine
 from trading_system.memory.global_state import GlobalState
 from trading_system.memory.reflexion_memory import ReflexionMemoryRepository
 from trading_system.memory.trade_memory import TradeMemoryRepository
+from trading_system.memory.audit_memory import AuditMemoryRepository
 from trading_system.memory.vector_memory import VectorMemory
 from trading_system.skills.backtesting_skill import BacktestingSkill
 from trading_system.skills.chatbot_command_parser import ChatbotCommandParser
@@ -80,6 +82,7 @@ async def build_container() -> DependencyContainer:
     global_state = GlobalState(initial_balance=100000.0)
     trade_memory = TradeMemoryRepository(sqlite_path=db_path)
     reflexion_memory = ReflexionMemoryRepository(sqlite_path=db_path)
+    audit_memory = AuditMemoryRepository(sqlite_path=db_path)
     vector_memory = VectorMemory(dimension=128)
 
     await trade_memory.initialize()
@@ -106,6 +109,12 @@ async def build_container() -> DependencyContainer:
         "upstox": UpstoxAdapter(broker_cfg["upstox"]),
     }
     broker_router = BrokerRouter(adapters=adapters)
+    reconciliation_engine = ReconciliationEngine(
+        broker_router=broker_router,
+        sqlite_path=db_path,
+        kill_switch=kill_switch,
+        interval_seconds=30
+    )
 
     paper_executor = PaperExecutor(global_state=global_state, trade_memory=trade_memory)
     live_executor = LiveExecutor(broker_router=broker_router, trade_memory=trade_memory)
@@ -151,7 +160,7 @@ async def build_container() -> DependencyContainer:
         event_bus=event_bus,
     )
 
-    register_default_handlers(event_bus, global_state, trade_memory)
+    register_default_handlers(event_bus, global_state, trade_memory, audit_memory)
 
     return DependencyContainer(
         settings=settings,
@@ -164,6 +173,8 @@ async def build_container() -> DependencyContainer:
         execution_engine=execution_engine,
         boss_agent=boss_agent,
         live_approval_manager=live_approval_manager,
+        audit_memory=audit_memory,
+        reconciliation_engine=reconciliation_engine,
     )
 
 
@@ -214,6 +225,8 @@ def create_app() -> FastAPI:
         app.include_router(create_telegram_router(container.settings, container.boss_agent, auth_guard=auth_guard))
 
         app.state.recovery_task = asyncio.create_task(auto_recovery_loop(container, app.state.stop_event))
+        if container.reconciliation_engine:
+            app.state.reconciliation_task = asyncio.create_task(container.reconciliation_engine.start())
         logger.info("Trading system startup completed")
 
     @app.on_event("shutdown")
@@ -222,7 +235,11 @@ def create_app() -> FastAPI:
         recovery_task = app.state.recovery_task
         if recovery_task:
             recovery_task.cancel()
-            await asyncio.gather(recovery_task, return_exceptions=True)
+        reconciliation_task = getattr(app.state, 'reconciliation_task', None)
+        if reconciliation_task:
+            reconciliation_task.cancel()
+        
+        await asyncio.gather(recovery_task, reconciliation_task, return_exceptions=True)
         container = app.state.container
         if container:
             await container.event_bus.stop()

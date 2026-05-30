@@ -30,9 +30,13 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from dotenv import load_dotenv
+
+if TYPE_CHECKING:
+    from trading_system.execution.execution_engine import ExecutionEngine
+    from trading_system.agents.risk_guardian import RiskGuardian
 
 # Ensure `import trading_system.*` works when running this file directly.
 _PKG_DIR = Path(__file__).resolve().parents[1]  # .../trading_system
@@ -72,7 +76,6 @@ from trading_system.config.models import (
 )
 from trading_system.events.event_bus import AsyncEventBus
 from trading_system.events.event_types import EventType
-from trading_system.execution.execution_engine import ExecutionEngine
 from trading_system.execution.persistent_live_approval import PersistentLiveApprovalManager
 from trading_system.integrations.hermes_client import HermesClient
 from trading_system.memory.global_state import GlobalState

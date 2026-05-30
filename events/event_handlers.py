@@ -9,6 +9,7 @@ from trading_system.events.event_bus import AsyncEventBus
 from trading_system.events.event_types import Event, EventType
 from trading_system.memory.global_state import GlobalState
 from trading_system.memory.trade_memory import TradeMemoryRepository
+from trading_system.memory.audit_memory import AuditMemoryRepository
 
 logger = logging.getLogger(__name__)
 
@@ -27,20 +28,33 @@ def register_default_handlers(
     bus: AsyncEventBus,
     state: GlobalState,
     trade_memory: TradeMemoryRepository,
+    audit_memory: AuditMemoryRepository,
 ) -> None:
     """Register default handlers used by orchestration layer."""
+
+    async def audit_logger(event: Event) -> None:
+        """WORM audit logger with hash chaining."""
+        try:
+            await audit_memory.log_event(
+                event_id=event.event_id,
+                event_type=event.event_type.value,
+                source_component=event.source,
+                source_instance="local-main", # Placeholder
+                correlation_id=event.correlation_id or "NONE",
+                payload=event.payload
+            )
+        except Exception:
+            logger.exception("Failed to write to audit chain")
 
     async def trade_executed_handler(event: Event) -> None:
         logger.info("Trade executed event received: %s", event.payload.get("order_id"))
 
-    async def position_closed_handler(event: Event) -> None:
-        logger.info("Position closed: %s", event.payload.get("symbol"))
+    # Register Audit Logger for ALL events
+    for etype in EventType:
+        bus.subscribe(etype, audit_logger)
 
-    bus.subscribe(EventType.SIGNAL_DETECTED, log_all_events)
+    bus.subscribe(EventType.SIGNAL_EMITTED, log_all_events)
     bus.subscribe(EventType.RISK_APPROVED, log_all_events)
     bus.subscribe(EventType.RISK_REJECTED, log_all_events)
     bus.subscribe(EventType.TRADE_EXECUTED, trade_executed_handler)
-    bus.subscribe(EventType.POSITION_CLOSED, position_closed_handler)
-    bus.subscribe(EventType.WHALE_ALERT, log_all_events)
-    bus.subscribe(EventType.MACRO_ALERT, log_all_events)
     bus.subscribe(EventType.KILL_SWITCH_TRIGGERED, on_kill_switch)
