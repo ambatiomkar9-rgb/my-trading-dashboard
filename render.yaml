@@ -13,3 +13,7 @@ services:
         value: "3.11.11"
       - key: SKIP_FRONTEND_BUILD
         value: "false"
+    disk:
+      name: trading-db
+      mountPath: /opt/render/project/src/trading-dashboard/data
+      sizeGB: 1
