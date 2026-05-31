@@ -593,6 +593,113 @@ async def _call_broker_method(broker: Any, method_name: str, *args: Any, **kwarg
         return result
 
 
+def _strategy_status_label(status: str) -> tuple[str, int]:
+    normalized = str(status or "paused").strip().lower()
+    if normalized == "running":
+        return "running", 100
+    if normalized == "backtested":
+        return "backtested", 75
+    if normalized == "backtesting":
+        return "backtesting", 60
+    if normalized == "paused":
+        return "paused", 35
+    return "offline", 0
+
+
+def _strategy_task_text(strategy: Strategy) -> str:
+    symbol = str(getattr(strategy, "symbol", "") or "").upper()
+    timeframe = str(getattr(strategy, "timeframe", "") or "4h")
+    status = str(getattr(strategy, "status", "") or "paused").lower()
+    return f"{symbol} {timeframe} strategy ({status})"
+
+
+def _strategy_summary(strategies: list[Strategy]) -> tuple[int, int]:
+    total = len(strategies)
+    running = sum(1 for row in strategies if str(getattr(row, "status", "") or "").lower() == "running")
+    return total, running
+
+
+async def _build_agent_cards(app: FastAPI) -> list[dict[str, Any]]:
+    """Build the live agent cards shown in the sidebar and animation page."""
+    runtime: TradingSystemRuntime | None = getattr(app.state, "runtime", None)
+    snapshot = runtime.status() if runtime is not None else {}
+    cfg = load_tooling_config()
+    session = SessionLocal()
+    try:
+        strategies = session.query(Strategy).order_by(Strategy.name.asc()).all()
+    finally:
+        session.close()
+
+    total_strategies, running_strategies = _strategy_summary(strategies)
+    boss_task = "Chat assistant ready"
+    if cfg.ollama_url:
+        boss_task = f"Chat assistant ready ({cfg.ollama_model})"
+    else:
+        boss_task = "Chat assistant ready (fallback mode)"
+
+    cards: list[dict[str, Any]] = [
+        {
+            "agent_id": "market_data",
+            "status": "online" if snapshot.get("market_data_online") else "offline",
+            "task": "Streaming live ticks" if snapshot.get("market_data_online") else "Waiting for market data",
+            "progress": 100 if snapshot.get("market_data_online") else 0,
+        },
+        {
+            "agent_id": "technical",
+            "status": "online" if snapshot.get("technical_agent_online") else "offline",
+            "task": "Generating signals" if snapshot.get("technical_agent_online") else "Waiting for watchlist",
+            "progress": 100 if snapshot.get("technical_agent_online") else 0,
+        },
+        {
+            "agent_id": "news",
+            "status": "online" if snapshot.get("news_agent_online") else "offline",
+            "task": "Scoring news sentiment" if snapshot.get("news_agent_online") else "Waiting for news inputs",
+            "progress": 100 if snapshot.get("news_agent_online") else 0,
+        },
+        {
+            "agent_id": "trade_execution",
+            "status": "online" if snapshot.get("tasks", {}).get("trade") else "offline",
+            "task": "Polling approved signals" if snapshot.get("tasks", {}).get("trade") else "Idle",
+            "progress": 100 if snapshot.get("tasks", {}).get("trade") else 0,
+        },
+        {
+            "agent_id": "telegram",
+            "status": "online" if snapshot.get("telegram_online") else "offline",
+            "task": "Listening for approvals" if snapshot.get("telegram_online") else "Waiting for Telegram config",
+            "progress": 100 if snapshot.get("telegram_online") else 0,
+        },
+        {
+            "agent_id": "boss_agent",
+            "status": "online",
+            "task": boss_task,
+            "progress": 100,
+        },
+        {
+            "agent_id": "strategy_manager",
+            "status": "online",
+            "task": (
+                f"Managing {running_strategies} running / {total_strategies} total strategies"
+                if total_strategies
+                else "Waiting for your first strategy"
+            ),
+            "progress": 100 if total_strategies else 20,
+        },
+    ]
+
+    for strategy in strategies[:10]:
+        status, progress = _strategy_status_label(str(getattr(strategy, "status", "") or "paused"))
+        cards.append(
+            {
+                "agent_id": f"strategy:{strategy.id}",
+                "status": status,
+                "task": _strategy_task_text(strategy),
+                "progress": progress,
+            }
+        )
+
+    return cards
+
+
 async def _process_chat_command(app: FastAPI, command_id: str, message: str) -> None:
     try:
         cfg = load_tooling_config()
@@ -664,39 +771,7 @@ async def _agent_broadcast_loop(app: FastAPI) -> None:
         while not app.state.shutdown_event.is_set():
             runtime: TradingSystemRuntime | None = getattr(app.state, "runtime", None)
             if runtime is not None:
-                snapshot = runtime.status()
-                agents = [
-                    {
-                        "agent_id": "market_data",
-                        "status": "online" if snapshot.get("market_data_online") else "offline",
-                        "task": "Streaming live ticks" if snapshot.get("market_data_online") else "Waiting for market data",
-                        "progress": 100 if snapshot.get("market_data_online") else 0,
-                    },
-                    {
-                        "agent_id": "technical",
-                        "status": "online" if snapshot.get("technical_agent_online") else "offline",
-                        "task": "Generating signals" if snapshot.get("technical_agent_online") else "Waiting for watchlist",
-                        "progress": 100 if snapshot.get("technical_agent_online") else 0,
-                    },
-                    {
-                        "agent_id": "news",
-                        "status": "online" if snapshot.get("news_agent_online") else "offline",
-                        "task": "Scoring news sentiment" if snapshot.get("news_agent_online") else "Waiting for news inputs",
-                        "progress": 100 if snapshot.get("news_agent_online") else 0,
-                    },
-                    {
-                        "agent_id": "trade_execution",
-                        "status": "online" if snapshot.get("tasks", {}).get("trade") else "offline",
-                        "task": "Polling approved signals" if snapshot.get("tasks", {}).get("trade") else "Idle",
-                        "progress": 100 if snapshot.get("tasks", {}).get("trade") else 0,
-                    },
-                    {
-                        "agent_id": "telegram",
-                        "status": "online" if snapshot.get("telegram_online") else "offline",
-                        "task": "Listening for approvals" if snapshot.get("telegram_online") else "Waiting for Telegram config",
-                        "progress": 100 if snapshot.get("telegram_online") else 0,
-                    },
-                ]
+                agents = await _build_agent_cards(app)
                 for agent in agents:
                     await app.state.ws_manager.broadcast(agent)
             await asyncio.sleep(5)
@@ -831,13 +906,13 @@ async def system_health(request: Request) -> dict[str, Any]:
         pass
 
     snapshot = runtime.status()
-    agents_online = sum(
-        1
-        for key in ("market_data_online", "news_agent_online", "telegram_online", "technical_agent_online")
-        if snapshot.get(key)
-    )
-    if snapshot.get("tasks", {}).get("trade"):
-        agents_online += 1
+    session = SessionLocal()
+    try:
+        strategies = session.query(Strategy).all()
+    finally:
+        session.close()
+    agents = await _build_agent_cards(request.app)
+    agents_online = sum(1 for agent in agents if str(agent.get("status") or "").lower() in {"online", "running"})
 
     broker_status = "paper" if runtime.broker_mode == "paper" else "not_authenticated"
     live_broker = getattr(request.app.state, "live_broker", None)
@@ -872,40 +947,7 @@ async def ws_agent_monitor(websocket: WebSocket) -> None:
     manager: AgentConnectionManager = websocket.app.state.ws_manager
     await manager.connect(websocket)
     try:
-        runtime = websocket.app.state.runtime
-        snapshot = runtime.status() if runtime is not None else {}
-        initial = [
-            {
-                "agent_id": "market_data",
-                "status": "online" if snapshot.get("market_data_online") else "offline",
-                "task": "Streaming live ticks" if snapshot.get("market_data_online") else "Waiting for market data",
-                "progress": 100 if snapshot.get("market_data_online") else 0,
-            },
-            {
-                "agent_id": "technical",
-                "status": "online" if snapshot.get("technical_agent_online") else "offline",
-                "task": "Generating signals" if snapshot.get("technical_agent_online") else "Waiting for watchlist",
-                "progress": 100 if snapshot.get("technical_agent_online") else 0,
-            },
-            {
-                "agent_id": "news",
-                "status": "online" if snapshot.get("news_agent_online") else "offline",
-                "task": "Scoring news sentiment" if snapshot.get("news_agent_online") else "Waiting for news inputs",
-                "progress": 100 if snapshot.get("news_agent_online") else 0,
-            },
-            {
-                "agent_id": "trade_execution",
-                "status": "online" if snapshot.get("tasks", {}).get("trade") else "offline",
-                "task": "Polling approved signals" if snapshot.get("tasks", {}).get("trade") else "Idle",
-                "progress": 100 if snapshot.get("tasks", {}).get("trade") else 0,
-            },
-            {
-                "agent_id": "telegram",
-                "status": "online" if snapshot.get("telegram_online") else "offline",
-                "task": "Listening for approvals" if snapshot.get("telegram_online") else "Waiting for Telegram config",
-                "progress": 100 if snapshot.get("telegram_online") else 0,
-            },
-        ]
+        initial = await _build_agent_cards(websocket.app)
         for agent in initial:
             await websocket.send_json(agent)
         while True:
@@ -919,40 +961,7 @@ async def ws_agent_monitor(websocket: WebSocket) -> None:
 @app.get("/agent-status")
 async def agent_status(request: Request) -> list[dict[str, Any]]:
     """Return the same agent monitor payload used by the websocket UI."""
-    runtime = _runtime(request)
-    snapshot = runtime.status()
-    return [
-        {
-            "agent_id": "market_data",
-            "status": "online" if snapshot.get("market_data_online") else "offline",
-            "task": "Streaming live ticks" if snapshot.get("market_data_online") else "Waiting for market data",
-            "progress": 100 if snapshot.get("market_data_online") else 0,
-        },
-        {
-            "agent_id": "technical",
-            "status": "online" if snapshot.get("technical_agent_online") else "offline",
-            "task": "Generating signals" if snapshot.get("technical_agent_online") else "Waiting for watchlist",
-            "progress": 100 if snapshot.get("technical_agent_online") else 0,
-        },
-        {
-            "agent_id": "news",
-            "status": "online" if snapshot.get("news_agent_online") else "offline",
-            "task": "Scoring news sentiment" if snapshot.get("news_agent_online") else "Waiting for news inputs",
-            "progress": 100 if snapshot.get("news_agent_online") else 0,
-        },
-        {
-            "agent_id": "trade_execution",
-            "status": "online" if snapshot.get("tasks", {}).get("trade") else "offline",
-            "task": "Polling approved signals" if snapshot.get("tasks", {}).get("trade") else "Idle",
-            "progress": 100 if snapshot.get("tasks", {}).get("trade") else 0,
-        },
-        {
-            "agent_id": "telegram",
-            "status": "online" if snapshot.get("telegram_online") else "offline",
-            "task": "Listening for approvals" if snapshot.get("telegram_online") else "Waiting for Telegram config",
-            "progress": 100 if snapshot.get("telegram_online") else 0,
-        },
-    ]
+    return await _build_agent_cards(request.app)
 
 
 @app.get("/settings")

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 
 interface AgentMetrics {
   response_time: number;
@@ -7,13 +7,37 @@ interface AgentMetrics {
   network_latency: number;
 }
 
+interface AgentCard {
+  agent_id: string;
+  status: string;
+  task: string;
+  progress: number;
+}
+
 export function AgentAnimationView() {
   const [metrics, setMetrics] = useState<AgentMetrics | null>(null);
+  const [agents, setAgents] = useState<Record<string, AgentCard>>({});
 
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(`${protocol}//${window.location.host}/ws/agent-monitor`);
-    ws.onmessage = () => {
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data) as Partial<AgentCard>;
+        if (data?.agent_id) {
+          setAgents((prev) => ({
+            ...prev,
+            [data.agent_id as string]: {
+              agent_id: data.agent_id as string,
+              status: String(data.status || 'offline'),
+              task: String(data.task || ''),
+              progress: Number(data.progress || 0),
+            },
+          }));
+        }
+      } catch {
+        // Ignore malformed updates.
+      }
       setMetrics({
         response_time: Math.random() * 3,
         agent_processing: Math.random() * 2,
@@ -23,6 +47,19 @@ export function AgentAnimationView() {
     };
     return () => ws.close();
   }, []);
+
+  const liveAgents = useMemo(
+    () => Object.values(agents).sort((a, b) => a.agent_id.localeCompare(b.agent_id)),
+    [agents],
+  );
+
+  const statusClass = (status: string) => {
+    const value = status.toLowerCase();
+    if (['online', 'running'].includes(value)) return 'text-green-400 border-green-800 bg-green-950/30';
+    if (['paused', 'idle', 'waiting'].includes(value)) return 'text-yellow-300 border-yellow-900 bg-yellow-950/30';
+    if (['backtested', 'processing'].includes(value)) return 'text-blue-300 border-blue-900 bg-blue-950/30';
+    return 'text-gray-300 border-gray-800 bg-gray-900';
+  };
 
   return (
     <div className="p-6 bg-black text-white">
@@ -147,10 +184,31 @@ export function AgentAnimationView() {
           </div>
         </div>
       </div>
+
+      <div className="bg-gray-900 p-4 rounded mt-6">
+        <h3 className="text-lg font-bold mb-4">Live Agent Status</h3>
+        {liveAgents.length === 0 ? (
+          <div className="text-gray-500 text-sm">Waiting for the backend to send live agent updates...</div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {liveAgents.map((agent) => (
+              <div key={agent.agent_id} className={`rounded border p-3 ${statusClass(agent.status)}`}>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="font-semibold text-sm">{agent.agent_id}</div>
+                  <div className="text-xs uppercase tracking-wide">{agent.status}</div>
+                </div>
+                <div className="text-xs text-gray-300 mt-2">{agent.task}</div>
+                <div className="mt-2 h-1 bg-gray-800 rounded overflow-hidden">
+                  <div className="h-full bg-current" style={{ width: `${Math.max(0, Math.min(100, agent.progress || 0))}%` }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
 // Back-compat for existing import in App.tsx
 export const AgentAnimation = AgentAnimationView;
-
