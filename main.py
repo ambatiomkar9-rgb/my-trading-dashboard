@@ -21,6 +21,10 @@ from trading_system.agents.whale_agent import WhaleIntelligenceAgent
 from trading_system.agents.research_service import ResearchService
 from trading_system.agents.validation_service import ValidationService
 from trading_system.registry.registry_service import RegistryService
+from trading_system.ha_layer.raft_witness import RaftWitness
+from trading_system.ha_layer.runtime_adapter_follower import RuntimeAdapterFollower
+from trading_system.ha_layer.runtime_adapter_leader import RuntimeAdapterLeader
+from trading_system.compliance.compliance_service import ComplianceService
 from trading_system.api.security import ApiKeyGuard, RateLimitMiddleware
 from trading_system.api.dashboard_api import create_dashboard_router
 from trading_system.api.telegram_api import create_telegram_router
@@ -175,6 +179,46 @@ async def build_container() -> DependencyContainer:
         required_approval_weight=settings.risk_limits.required_approval_weight,
     )
     
+    # HERMES v5.2 HA Layer
+    runtime_adapter_leader = None
+    runtime_adapter_follower = None
+    raft_witness = None
+    node_role = settings.ha_settings.node_role
+    
+    if node_role == "leader":
+        runtime_adapter_leader = RuntimeAdapterLeader(
+            instance_id=os.getenv("NODE_INSTANCE_ID", "local-leader"),
+            event_bus=event_bus,
+            hermes_client=hermes_client,
+            strategy_vm=pinescript_generator, # Use pinescript_generator as a stand-in for strategy VM
+            interval_seconds=settings.ha_settings.raft_heartbeat_interval_seconds,
+        )
+    elif node_role == "follower":
+        runtime_adapter_follower = RuntimeAdapterFollower(
+            instance_id=os.getenv("NODE_INSTANCE_ID", "local-follower"),
+            event_bus=event_bus,
+            hermes_client=hermes_client,
+            strategy_vm=pinescript_generator,
+            leader_instance_id=settings.ha_settings.leader_instance_id or "unknown-leader",
+            interval_seconds=settings.ha_settings.raft_heartbeat_interval_seconds,
+        )
+    elif node_role == "witness":
+        raft_witness = RaftWitness(
+            instance_id=os.getenv("NODE_INSTANCE_ID", "local-witness"),
+            interval_seconds=settings.ha_settings.raft_heartbeat_interval_seconds,
+        )
+
+    # HERMES v5.2 Compliance Service
+    compliance_service = ComplianceService(
+        sqlite_path=db_path,
+        event_bus=event_bus,
+        audit_memory=audit_memory,
+        order_to_trade_ratio_threshold=settings.compliance.order_to_trade_ratio_threshold,
+        physical_kill_switch_test_time_utc=settings.compliance.physical_kill_switch_test_time_utc,
+        certification_check_interval_seconds=settings.compliance.certification_check_interval_seconds,
+        compliance_check_interval_seconds=settings.compliance.compliance_check_interval_seconds,
+    )
+
     boss_agent = BossAgent(
         parser=parser,
         technical_agent=technical_agent,
@@ -187,7 +231,6 @@ async def build_container() -> DependencyContainer:
         global_state=global_state,
         event_bus=event_bus,
     )
-
     register_default_handlers(event_bus, global_state, trade_memory, audit_memory)
 
     return DependencyContainer(
@@ -206,6 +249,10 @@ async def build_container() -> DependencyContainer:
         research_service=research_service,
         validation_service=validation_service,
         registry_service=registry_service,
+        runtime_adapter_leader=runtime_adapter_leader,
+        runtime_adapter_follower=runtime_adapter_follower,
+        raft_witness=raft_witness,
+        compliance_service=compliance_service,
     )
 
 
@@ -264,6 +311,18 @@ def create_app() -> FastAPI:
             app.state.validation_task = asyncio.create_task(container.validation_service.start())
         if container.registry_service:
             app.state.registry_task = asyncio.create_task(container.registry_service.start())
+        
+        # Start HA layer components based on node role
+        if container.settings.ha_settings.node_role == "leader" and container.runtime_adapter_leader:
+            app.state.runtime_adapter_leader_task = asyncio.create_task(container.runtime_adapter_leader.start())
+        elif container.settings.ha_settings.node_role == "follower" and container.runtime_adapter_follower:
+            app.state.runtime_adapter_follower_task = asyncio.create_task(container.runtime_adapter_follower.start())
+        elif container.settings.ha_settings.node_role == "witness" and container.raft_witness:
+            app.state.raft_witness_task = asyncio.create_task(container.raft_witness.start())
+
+        if container.compliance_service:
+            app.state.compliance_task = asyncio.create_task(container.compliance_service.start())
+
         logger.info("Trading system startup completed")
 
     @app.on_event("shutdown")
@@ -285,7 +344,31 @@ def create_app() -> FastAPI:
         if registry_task:
             registry_task.cancel()
         
-        await asyncio.gather(recovery_task, reconciliation_task, research_task, validation_task, registry_task, return_exceptions=True)
+        runtime_adapter_leader_task = getattr(app.state, 'runtime_adapter_leader_task', None)
+        if runtime_adapter_leader_task:
+            runtime_adapter_leader_task.cancel()
+        runtime_adapter_follower_task = getattr(app.state, 'runtime_adapter_follower_task', None)
+        if runtime_adapter_follower_task:
+            runtime_adapter_follower_task.cancel()
+        raft_witness_task = getattr(app.state, 'raft_witness_task', None)
+        if raft_witness_task:
+            raft_witness_task.cancel()
+        compliance_task = getattr(app.state, 'compliance_task', None)
+        if compliance_task:
+            compliance_task.cancel()
+        
+        await asyncio.gather(
+            recovery_task, 
+            reconciliation_task, 
+            research_task, 
+            validation_task, 
+            registry_task,
+            runtime_adapter_leader_task,
+            runtime_adapter_follower_task,
+            raft_witness_task,
+            compliance_task,
+            return_exceptions=True
+        )
         container = app.state.container
         if container:
             await container.event_bus.stop()

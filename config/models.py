@@ -413,3 +413,41 @@ class OrderRejected(HermesEvent):
 class KillSwitchTriggered(HermesEvent):
     """Universal emergency halt event."""
     event_type: Literal["KILL_SWITCH_TRIGGERED"] = "KILL_SWITCH_TRIGGERED"
+
+
+# --- Compliance Events ---
+class OrderToTradeRatioEventPayload(BaseModel):
+    account_id: UUID
+    broker_id: str
+    order_count: int
+    trade_count: int
+    ratio: Decimal
+    threshold: Decimal
+    triggered_at: datetime
+    
+class OrderToTradeRatioEvent(HermesEvent):
+    event_type: Literal["ORDER_TO_TRADE_RATIO_ALERT"] = "ORDER_TO_TRADE_RATIO_ALERT"
+    payload: OrderToTradeRatioEventPayload
+
+class SebicertificationEventPayload(BaseModel):
+    certification_id: str
+    entity_name: str
+    expiry_date: datetime
+    status: Literal["active", "expired", "expiring_soon"]
+    checked_at: datetime
+    
+class SebicertificationEvent(HermesEvent):
+    event_type: Literal["SEBI_CERTIFICATION_ALERT"] = "SEBI_CERTIFICATION_ALERT"
+    payload: SebicertificationEventPayload
+
+class AnnualComplianceExportEventPayload(BaseModel):
+    fy_year: str
+    export_path: str
+    start_date: datetime
+    end_date: datetime
+    exported_at: datetime
+    status: Literal["success", "failed"]
+
+class AnnualComplianceExportEvent(HermesEvent):
+    event_type: Literal["ANNUAL_COMPLIANCE_EXPORT"] = "ANNUAL_COMPLIANCE_EXPORT"
+    payload: AnnualComplianceExportEventPayload

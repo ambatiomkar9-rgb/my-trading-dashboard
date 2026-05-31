@@ -72,6 +72,43 @@ class RegistryService:
         self._is_running = False
         logger.info("Registry Service stopped.")
 
+    async def list_strategies(
+        self,
+        status: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List strategies with optional filtering."""
+        async with aiosqlite.connect(self.sqlite_path) as db:
+            query = "SELECT * FROM strategies"
+            params = []
+            if status:
+                query += " WHERE status = ?"
+                params.append(status)
+            query += f" LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+
+            db.row_factory = aiosqlite.Row # To get dict-like rows
+            async with db.execute(query, params) as cursor:
+                strategies = [dict(row) for row in await cursor.fetchall()]
+                # Convert JSON strings back to dicts
+                for s in strategies:
+                    s["regime_params_json"] = json.loads(s["regime_params_json"])
+                    s["validation_passed_payload_json"] = json.loads(s["validation_passed_payload_json"])
+                return strategies
+
+    async def count_strategies(self, status: Optional[str] = None) -> int:
+        """Count total strategies with optional filtering."""
+        async with aiosqlite.connect(self.sqlite_path) as db:
+            query = "SELECT COUNT(*) FROM strategies"
+            params = []
+            if status:
+                query += " WHERE status = ?"
+                params.append(status)
+            async with db.execute(query, params) as cursor:
+                row = await cursor.fetchone()
+                return row[0] if row else 0
+
     def _register_event_handlers(self) -> None:
         """Subscribe to relevant events from Validation Service."""
         self.event_bus.subscribe(EventType.VALIDATION_PASSED, self._handle_validation_passed)
@@ -270,3 +307,77 @@ class RegistryService:
                 logger.info("Approval for strategy %s recorded. Quorum not yet met.", strategy_id)
                 # In a real system, store approver_record and check total weight
                 return False
+
+    async def rollback_strategy(
+        self,
+        strategy_id: str,
+        target_version_id: str,
+        reason: str,
+        initiator_id: UUID,
+        signature: str,
+    ) -> bool:
+        """
+        Rolls back a strategy to a previous valid version.
+        Matches HERMES v5.2 Task 4.1 API Contracts: POST /strategies/{id}/rollback.
+        """
+        async with aiosqlite.connect(self.sqlite_path) as db:
+            async with db.execute(
+                "SELECT id, status, version, genome_hash, correlation_id FROM strategies WHERE id = ?",
+                (strategy_id,)
+            ) as cursor:
+                strategy_row = await cursor.fetchone()
+                if not strategy_row:
+                    logger.warning("Strategy %s not found for rollback.", strategy_id)
+                    return False
+                current_status = strategy_row[1]
+                current_version = strategy_row[2]
+                current_genome_hash = strategy_row[3]
+                correlation_id = UUID(strategy_row[4])
+
+            if current_status not in ["approved", "full_live", "small_live", "paper_trading"]:
+                logger.warning("Strategy %s cannot be rolled back from current status: %s", strategy_id, current_status)
+                return False
+
+            # For simplicity, we assume target_version_id refers to a previous ID
+            # In a real system, strategy_versions table would be queried for lineage.
+            async with db.execute(
+                "SELECT id, genome_hash, bytecode FROM strategies WHERE id = ? AND status = 'approved'",
+                (target_version_id,)
+            ) as cursor:
+                target_version_row = await cursor.fetchone()
+                if not target_version_row:
+                    logger.warning("Target version %s not found or not approved for strategy %s.", target_version_id, strategy_id)
+                    return False
+                
+            # Simulate atomic rollback
+            now = datetime.now(timezone.utc)
+            rollback_payload = RegistryRollbackPayload(
+                strategy_id=UUID(strategy_id),
+                previous_version_id=UUID(strategy_id), # Simplified, should be actual previous version ID
+                new_version_id=UUID(target_version_id),
+                reason=reason,
+                rolled_back_at=now,
+                hot_swap=True,
+            )
+            rollback_event = RegistryRollback(
+                event_id=uuid4(),
+                timestamp=now,
+                correlation_id=correlation_id,
+                source_component="registry_service",
+                source_instance="local-registry-node",
+                payload=rollback_payload.model_dump(),
+                signature="HSM_SIGNED_EVENT" # Placeholder for real HSM signature
+            )
+            
+            await db.execute(
+                "UPDATE strategies SET status = 'rolled_back', retired_reason = ?, updated_at = ? WHERE id = ?",
+                (f"Rolled back to {target_version_id} due to: {reason}", now.isoformat(), strategy_id)
+            )
+            await db.execute(
+                "UPDATE strategies SET status = 'approved', updated_at = ? WHERE id = ?",
+                (now.isoformat(), target_version_id)
+            )
+            await db.commit()
+            await self.event_bus.publish(rollback_event)
+            logger.info("Strategy %s rolled back to version %s. Event published.", strategy_id, target_version_id)
+            return True

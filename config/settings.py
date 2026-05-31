@@ -108,6 +108,18 @@ class ResearchSettings(BaseModel):
     generation_interval_seconds: int = Field(default=300, gt=0) # Generate every 5 minutes
     validation_interval_seconds: int = Field(default=10, gt=0) # Validate every 10 seconds
 
+class HaSettings(BaseModel):
+    # Node role can be 'leader', 'follower', 'witness'
+    node_role: str = Field(default="leader", pattern="^(leader|follower|witness)$")
+    leader_instance_id: Optional[str] = None # For followers/witnesses to track leader
+    raft_heartbeat_interval_seconds: int = Field(default=1, gt=0) # Raft heartbeat
+
+class ComplianceSettings(BaseModel):
+    order_to_trade_ratio_threshold: Decimal = Field(default=Decimal("50.0"), gt=0) # SEBI: 50:1 (Orders:Trades)
+    physical_kill_switch_test_time_utc: str = Field(default="02:30") # 08:00 IST is 02:30 UTC
+    certification_check_interval_seconds: int = Field(default=4 * 3600, gt=0) # Every 4 hours
+    compliance_check_interval_seconds: int = Field(default=60, gt=0) # Every minute for OTR
+
 class AppSettings(BaseModel):
     """Global application settings."""
 
@@ -121,6 +133,8 @@ class AppSettings(BaseModel):
     model_routing: ModelRoutingSettings = Field(default_factory=ModelRoutingSettings)
     api: ApiSettings = Field(default_factory=ApiSettings)
     research: ResearchSettings = Field(default_factory=ResearchSettings)
+    ha_settings: HaSettings = Field(default_factory=HaSettings) # New HA settings
+    compliance: ComplianceSettings = Field(default_factory=ComplianceSettings) # New Compliance settings
     watchlist: List[str] = Field(default_factory=lambda: ["BTC/USDT", "ETH/USDT", "INFY.NS"])
 
 
@@ -189,6 +203,17 @@ def load_settings() -> AppSettings:
             generation_interval_seconds=int(os.getenv("TRADING_RESEARCH_GENERATION_INTERVAL", "300")),
             validation_interval_seconds=int(os.getenv("TRADING_RESEARCH_VALIDATION_INTERVAL", "10")),
         ),
+        ha_settings=HaSettings(
+            node_role=os.getenv("TRADING_HA_NODE_ROLE", "leader"),
+            leader_instance_id=os.getenv("TRADING_HA_LEADER_INSTANCE_ID"),
+            raft_heartbeat_interval_seconds=int(os.getenv("TRADING_HA_RAFT_HEARTBEAT_SEC", "1")),
+        ),
+        compliance=ComplianceSettings(
+            order_to_trade_ratio_threshold=Decimal(os.getenv("TRADING_COMPLIANCE_OTR_THRESHOLD", "50.0")),
+            physical_kill_switch_test_time_utc=os.getenv("TRADING_COMPLIANCE_KILL_SWITCH_TEST_TIME_UTC", "02:30"),
+            certification_check_interval_seconds=int(os.getenv("TRADING_COMPLIANCE_CERT_CHECK_INTERVAL", "14400")),
+            compliance_check_interval_seconds=int(os.getenv("TRADING_COMPLIANCE_CHECK_INTERVAL", "60")),
+        ),
     )
 
 
@@ -211,3 +236,7 @@ class DependencyContainer:
     research_service: Optional[object] = None
     validation_service: Optional[object] = None
     registry_service: Optional[object] = None
+    runtime_adapter_leader: Optional[object] = None
+    runtime_adapter_follower: Optional[object] = None
+    raft_witness: Optional[object] = None
+    compliance_service: Optional[object] = None
