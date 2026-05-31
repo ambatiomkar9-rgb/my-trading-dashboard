@@ -104,6 +104,10 @@ class ApiSettings(BaseModel):
     live_approval_ttl_seconds: int = 300
 
 
+class ResearchSettings(BaseModel):
+    generation_interval_seconds: int = Field(default=300, gt=0) # Generate every 5 minutes
+    validation_interval_seconds: int = Field(default=10, gt=0) # Validate every 10 seconds
+
 class AppSettings(BaseModel):
     """Global application settings."""
 
@@ -116,6 +120,7 @@ class AppSettings(BaseModel):
     risk_limits: RiskLimits = Field(default_factory=RiskLimits)
     model_routing: ModelRoutingSettings = Field(default_factory=ModelRoutingSettings)
     api: ApiSettings = Field(default_factory=ApiSettings)
+    research: ResearchSettings = Field(default_factory=ResearchSettings)
     watchlist: List[str] = Field(default_factory=lambda: ["BTC/USDT", "ETH/USDT", "INFY.NS"])
 
 
@@ -180,6 +185,10 @@ def load_settings() -> AppSettings:
             rate_limit_requests_per_minute=int(os.getenv("TRADING_RATE_LIMIT_RPM", "120")),
             live_approval_ttl_seconds=int(os.getenv("TRADING_LIVE_APPROVAL_TTL_SECONDS", "300")),
         ),
+        research=ResearchSettings(
+            generation_interval_seconds=int(os.getenv("TRADING_RESEARCH_GENERATION_INTERVAL", "300")),
+            validation_interval_seconds=int(os.getenv("TRADING_RESEARCH_VALIDATION_INTERVAL", "10")),
+        ),
     )
 
 
@@ -199,3 +208,6 @@ class DependencyContainer:
     live_approval_manager: object
     audit_memory: Optional[object] = None
     reconciliation_engine: Optional[object] = None
+    research_service: Optional[object] = None
+    validation_service: Optional[object] = None
+    registry_service: Optional[object] = None

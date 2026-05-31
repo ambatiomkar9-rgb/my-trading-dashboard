@@ -18,6 +18,9 @@ from trading_system.agents.reflexion_agent import ReflexionAgent
 from trading_system.agents.risk_guardian import RiskGuardian
 from trading_system.agents.technical_agent import TechnicalAnalysisAgent
 from trading_system.agents.whale_agent import WhaleIntelligenceAgent
+from trading_system.agents.research_service import ResearchService
+from trading_system.agents.validation_service import ValidationService
+from trading_system.registry.registry_service import RegistryService
 from trading_system.api.security import ApiKeyGuard, RateLimitMiddleware
 from trading_system.api.dashboard_api import create_dashboard_router
 from trading_system.api.telegram_api import create_telegram_router
@@ -50,6 +53,7 @@ from trading_system.skills.news_intelligence_skill import NewsIntelligenceSkill
 from trading_system.skills.pinescript_strategy_generator import MultiModelRouter, PineScriptStrategyGenerator
 from trading_system.skills.technical_analysis_skill import TechnicalAnalysisSkill
 from trading_system.skills.whale_tracker_skill import WhaleTrackerSkill
+from trading_system.integrations.hermes_client import HermesClient # Added for completeness
 
 logging.basicConfig(
     level=logging.INFO,
@@ -138,6 +142,7 @@ async def build_container() -> DependencyContainer:
     backtester = BacktestingSkill()
     model_router = MultiModelRouter(settings.model_routing)
     pinescript_generator = PineScriptStrategyGenerator(router=model_router, backtester=backtester)
+    hermes_client = HermesClient() # Initialize HermesClient
 
     # Agents
     technical_agent = TechnicalAnalysisAgent(technical_skill)
@@ -147,6 +152,29 @@ async def build_container() -> DependencyContainer:
     _ = PineScriptGenerationAgent(generator=pinescript_generator)
     _ = ReflexionAgent(repo=reflexion_memory, vector_memory=vector_memory)
 
+    # HERMES v5.2 Research & Validation Services
+    research_service = ResearchService(
+        sqlite_path=db_path,
+        event_bus=event_bus,
+        hermes_client=hermes_client,
+        multi_model_router=model_router,
+        interval_seconds=settings.research.generation_interval_seconds,
+    )
+    validation_service = ValidationService(
+        sqlite_path=db_path,
+        event_bus=event_bus,
+        hermes_client=hermes_client,
+        interval_seconds=settings.research.validation_interval_seconds,
+    )
+
+    registry_service = RegistryService(
+        sqlite_path=db_path,
+        event_bus=event_bus,
+        hermes_client=hermes_client,
+        interval_seconds=settings.research.validation_interval_seconds, # Using same interval for now
+        required_approval_weight=settings.risk_limits.required_approval_weight,
+    )
+    
     boss_agent = BossAgent(
         parser=parser,
         technical_agent=technical_agent,
@@ -175,6 +203,9 @@ async def build_container() -> DependencyContainer:
         live_approval_manager=live_approval_manager,
         audit_memory=audit_memory,
         reconciliation_engine=reconciliation_engine,
+        research_service=research_service,
+        validation_service=validation_service,
+        registry_service=registry_service,
     )
 
 
@@ -227,6 +258,12 @@ def create_app() -> FastAPI:
         app.state.recovery_task = asyncio.create_task(auto_recovery_loop(container, app.state.stop_event))
         if container.reconciliation_engine:
             app.state.reconciliation_task = asyncio.create_task(container.reconciliation_engine.start())
+        if container.research_service:
+            app.state.research_task = asyncio.create_task(container.research_service.start())
+        if container.validation_service:
+            app.state.validation_task = asyncio.create_task(container.validation_service.start())
+        if container.registry_service:
+            app.state.registry_task = asyncio.create_task(container.registry_service.start())
         logger.info("Trading system startup completed")
 
     @app.on_event("shutdown")
@@ -238,8 +275,17 @@ def create_app() -> FastAPI:
         reconciliation_task = getattr(app.state, 'reconciliation_task', None)
         if reconciliation_task:
             reconciliation_task.cancel()
+        research_task = getattr(app.state, 'research_task', None)
+        if research_task:
+            research_task.cancel()
+        validation_task = getattr(app.state, 'validation_task', None)
+        if validation_task:
+            validation_task.cancel()
+        registry_task = getattr(app.state, 'registry_task', None)
+        if registry_task:
+            registry_task.cancel()
         
-        await asyncio.gather(recovery_task, reconciliation_task, return_exceptions=True)
+        await asyncio.gather(recovery_task, reconciliation_task, research_task, validation_task, registry_task, return_exceptions=True)
         container = app.state.container
         if container:
             await container.event_bus.stop()

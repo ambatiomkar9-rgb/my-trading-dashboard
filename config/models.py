@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Literal
 from uuid import UUID, uuid4
 
@@ -84,6 +85,7 @@ class RiskLimits(BaseModel):
     min_volume_percentile: float = Field(default=0.1, ge=0, le=1)
     max_order_adv_pct: float = Field(default=0.1, ge=0, le=1)
     account_health_required: bool = True
+    required_approval_weight: int = Field(default=3, gt=0) # HERMES v5.2 spec
 
 
 class Signal(BaseModel):
@@ -253,6 +255,8 @@ def redact_secret(value: str, visible: int = 4) -> str:
     return f"{hidden}{value[-visible:]}"
 
 
+from decimal import Decimal
+
 class HermesEvent(BaseModel):
     """Universal event schema for HERMES v5.2."""
     event_id: UUID = Field(default_factory=uuid4)
@@ -266,6 +270,64 @@ class HermesEvent(BaseModel):
     payload: Dict[str, Any]
 
 
+# --- Research Events ---
+class StrategyGeneratedPayload(BaseModel):
+    genome: str  # Base64-encoded strategy genome (PineScript, Python, etc.)
+    genome_hash: str  # SHA-256 of genome
+    parent_genome_hash: Optional[str] = None
+    hypothesis_id: Optional[str] = None
+    sector: str
+    category: str
+    regime: str
+    generated_at: datetime
+    outbox_id: int
+
+class StrategyGenerated(HermesEvent):
+    event_type: Literal["STRATEGY_GENERATED"] = "STRATEGY_GENERATED"
+    payload: StrategyGeneratedPayload
+
+
+# --- Validation Events ---
+class ValidationPassedPayload(BaseModel):
+    genome_hash: str
+    backtest_id: int
+    sharpe_ratio: Decimal
+    max_drawdown_pct: Decimal
+    total_trades: int
+    oos_sharpe_ratio: Decimal
+    walk_forward_efficiency: Decimal
+    monte_carlo_95th_dd: Decimal
+    parameter_stability_score: Decimal
+    benchmark_alpha: Decimal
+    benchmark_beta: Decimal
+    information_ratio: Decimal
+    after_tax_alpha: Decimal
+    paper_drift_pct: Optional[Decimal] = None
+    similarity_score: Decimal
+    validation_duration_ms: int
+    validated_at: datetime
+
+class ValidationPassed(HermesEvent):
+    event_type: Literal["VALIDATION_PASSED"] = "VALIDATION_PASSED"
+    payload: ValidationPassedPayload
+
+
+class ValidationFailedPayload(BaseModel):
+    genome_hash: str
+    backtest_id: int
+    failure_reason: str
+    failed_metric: Optional[str] = None
+    failed_value: Optional[Decimal] = None
+    required_threshold: Optional[Decimal] = None
+    validation_duration_ms: int
+    validated_at: datetime
+
+class ValidationFailed(HermesEvent):
+    event_type: Literal["VALIDATION_FAILED"] = "VALIDATION_FAILED"
+    payload: ValidationFailedPayload
+
+
+# --- Core Execution Events ---
 class SignalEmitted(HermesEvent):
     """Event published by Runtime Adapter."""
     event_type: Literal["SIGNAL_EMITTED"] = "SIGNAL_EMITTED"
@@ -289,6 +351,48 @@ class RiskRejected(HermesEvent):
 class ExecutionCommand(HermesEvent):
     """Event published by BossAgent to TradeExecutor."""
     event_type: Literal["EXECUTION_COMMAND"] = "EXECUTION_COMMAND"
+
+
+# --- Registry Events ---
+class ApproverRecord(BaseModel):
+    approver_id: UUID
+    weight: int
+    timestamp: datetime
+    signature: str # Ed25519 of approval record
+
+
+class StrategyApprovedPayload(BaseModel):
+    strategy_id: UUID
+    genome_hash: str
+    version: int
+    bytecode: str  # Base64
+    bytecode_checksum: str
+    regime_params: Dict[str, Any]
+    max_capacity_rupees: Decimal
+    sector: str
+    category: str
+    approved_at: datetime
+    approvers: List[ApproverRecord]
+    quorum_weight: int
+    required_weight: int
+    hot_swap: bool = False  # If True, Runtime Adapter must hot-swap immediately
+
+class StrategyApproved(HermesEvent):
+    event_type: Literal["STRATEGY_APPROVED"] = "STRATEGY_APPROVED"
+    payload: StrategyApprovedPayload
+
+
+class RegistryRollbackPayload(BaseModel):
+    strategy_id: UUID
+    previous_version_id: UUID
+    new_version_id: UUID
+    reason: str
+    rolled_back_at: datetime
+    hot_swap: bool = True
+
+class RegistryRollback(HermesEvent):
+    event_type: Literal["REGISTRY_ROLLBACK"] = "REGISTRY_ROLLBACK"
+    payload: RegistryRollbackPayload
 
 
 class OrderSubmitted(HermesEvent):

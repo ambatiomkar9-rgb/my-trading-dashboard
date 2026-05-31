@@ -1,5 +1,3 @@
-"""Event contracts for the system event bus."""
-
 from __future__ import annotations
 
 import uuid
@@ -12,6 +10,7 @@ from typing import Any, Dict, Optional
 class EventType(str, Enum):
     """Canonical event names for HERMES v5.2."""
 
+    # Core Execution & Safety
     SIGNAL_EMITTED = "SIGNAL_EMITTED"
     RISK_CHECK_REQUESTED = "RISK_CHECK_REQUESTED"
     RISK_APPROVED = "RISK_APPROVED"
@@ -20,13 +19,23 @@ class EventType(str, Enum):
     ORDER_SUBMITTED = "ORDER_SUBMITTED"
     ORDER_FILLED = "ORDER_FILLED"
     ORDER_REJECTED = "ORDER_REJECTED"
+    ORDER_MODIFIED = "ORDER_MODIFIED" # Added for completeness
     KILL_SWITCH_TRIGGERED = "KILL_SWITCH_TRIGGERED"
     HEARTBEAT = "HEARTBEAT"
+    RECONCILIATION_FAILED = "RECONCILIATION_FAILED" # Added for completeness
+
+    # Research & Validation
+    STRATEGY_GENERATED = "STRATEGY_GENERATED"
+    VALIDATION_STARTED = "VALIDATION_STARTED"
+    VALIDATION_PASSED = "VALIDATION_PASSED"
+    VALIDATION_FAILED = "VALIDATION_FAILED"
+    STRATEGY_APPROVED = "STRATEGY_APPROVED"
+    REGISTRY_ROLLBACK = "REGISTRY_ROLLBACK"
     
     # Legacy / Additional
     WHALE_ALERT = "WhaleAlert"
     MACRO_ALERT = "MacroAlert"
-    SYSTEM_HEARTBEAT = "SystemHeartbeat"
+    SYSTEM_HEARTBEAT = "SystemHeartbeat" # Redundant with HEARTBEAT, but keeping for now
 
 
 @dataclass(slots=True)
