@@ -32,3 +32,6 @@ yarn-debug.log*
 # Environment
 .env
 .env.local
+
+# Runtime data and generated local files
+data/

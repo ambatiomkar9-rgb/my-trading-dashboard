@@ -1,0 +1,69 @@
+"""Dashboard JWT helpers and FastAPI authentication dependencies."""
+from __future__ import annotations
+
+import logging
+from typing import Optional
+
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+try:
+    from backend.security.jwt_auth import JwtAuth, load_jwt_auth  # type: ignore
+except ModuleNotFoundError:  # noqa: BLE001
+    from security.jwt_auth import JwtAuth, load_jwt_auth  # type: ignore
+
+logger = logging.getLogger(__name__)
+security = HTTPBearer(auto_error=False)
+
+
+def _get_auth() -> Optional[JwtAuth]:
+    try:
+        return load_jwt_auth()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("JWT auth loader failed: %s", exc)
+        return None
+
+
+def create_token(username: str, role: str = "user") -> str:
+    """Create a signed JWT for the supplied username."""
+    auth = _get_auth()
+    if not auth:
+        raise RuntimeError("JWT_SECRET_KEY is not configured")
+    return auth.create_token(username, role=role)
+
+
+def decode_token(token: str) -> Optional[dict]:
+    """Decode and validate a JWT. Returns None if invalid."""
+    try:
+        auth = _get_auth()
+        if not auth:
+            return None
+        return auth.verify_token(token)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("decode_token failed: %s", exc)
+        return None
+
+
+async def verify_token(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> dict:
+    """FastAPI dependency that extracts and validates a Bearer token."""
+    try:
+        if not credentials:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        payload = decode_token(credentials.credentials)
+        if not payload:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+        return {"username": payload.get("sub", ""), "role": payload.get("role", "user")}
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+
+async def require_admin(user: dict = Depends(verify_token)) -> dict:
+    """Dependency that enforces admin role."""
+    if str(user.get("role") or "") != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+    return user
+

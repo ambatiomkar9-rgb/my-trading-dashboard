@@ -10,9 +10,11 @@ import httpx
 try:
     # When executed as a module (repo root in sys.path)
     from backend.market_data.symbol_master_service import SymbolMasterService, build_symbol_master  # type: ignore
+    from backend.execution.auth.broker_auth_manager import BrokerAuthManager  # type: ignore
 except ModuleNotFoundError:  # noqa: BLE001
     # When executed from within backend/
     from market_data.symbol_master_service import SymbolMasterService, build_symbol_master  # type: ignore
+    from execution.auth.broker_auth_manager import BrokerAuthManager  # type: ignore
 
 
 class UpstoxError(RuntimeError):
@@ -27,10 +29,12 @@ class UpstoxBroker:
     IMPORTANT:
     - This module is safe to deploy to Render, but you should only ENABLE live broker calls
       if you set secrets as Render environment variables.
-    - Token refresh is not implemented here because Upstox OAuth refresh flows vary by setup.
+    - OAuth refresh is supported when UPSTOX_API_KEY/UPSTOX_API_SECRET are configured and you
+      have authenticated via /broker-login → /broker-callback.
     """
 
-    access_token: str
+    # Backward-compatible token mode (env token). If empty, BrokerAuthManager is used.
+    access_token: str = ""
     base_url: str = "https://api.upstox.com/v2"
     timeout_sec: float = 30.0
     connect_timeout_sec: float = 10.0
@@ -38,6 +42,7 @@ class UpstoxBroker:
     symbol_master: Optional[SymbolMasterService] = None
     # With slots=True, we must declare attributes we set in __post_init__.
     client: httpx.AsyncClient = field(init=False, repr=False)
+    auth: BrokerAuthManager = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.client = httpx.AsyncClient(
@@ -47,13 +52,17 @@ class UpstoxBroker:
         )
         if self.symbol_master is None:
             self.symbol_master = build_symbol_master()
+        self.auth = BrokerAuthManager("upstox")
 
     async def close(self) -> None:
         await self.client.aclose()
 
-    def _headers(self) -> Dict[str, str]:
+    async def _headers(self) -> Dict[str, str]:
+        token = self.access_token.strip()
+        if not token:
+            token = await self.auth.get_access_token()
         return {
-            "Authorization": f"Bearer {self.access_token}",
+            "Authorization": f"Bearer {token}",
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
@@ -63,10 +72,16 @@ class UpstoxBroker:
         last_exc: Optional[Exception] = None
         for attempt in range(self.max_retries):
             try:
-                r = await self.client.request(method, url, headers=self._headers(), **kwargs)
+                r = await self.client.request(method, url, headers=await self._headers(), **kwargs)
                 if r.status_code == 401:
-                    # Access token invalid/expired. Caller must update UPSTOX_ACCESS_TOKEN.
-                    raise UpstoxError("Upstox unauthorized (401). Update UPSTOX_ACCESS_TOKEN.")
+                    # If we are in OAuth mode, refresh and retry.
+                    if not self.access_token.strip():
+                        ok = await self.auth.refresh()
+                        if ok:
+                            continue
+                    raise UpstoxError(
+                        "Upstox unauthorized (401). Re-authenticate via /broker-login (or update UPSTOX_ACCESS_TOKEN)."
+                    )
                 r.raise_for_status()
                 return r.json()
             except (httpx.HTTPError, UpstoxError) as exc:
@@ -84,11 +99,16 @@ class UpstoxBroker:
         # Upstox docs: /user/get-funds-and-margin
         return await self._request("GET", "/user/get-funds-and-margin")
 
+    async def get_positions(self) -> Dict[str, Any]:
+        """Fetch the current positions from Upstox."""
+        return await self._request("GET", "/portfolio/short-term-positions")
+
     async def place_order(
         self,
         symbol: str,
         side: str,
         quantity: int,
+        client_order_id: Optional[str] = None,
         order_type: str = "MARKET",
         price: Optional[float] = None,
         stop_loss: Optional[float] = None,
@@ -113,7 +133,7 @@ class UpstoxBroker:
             "product": product,  # D=Delivery, I=Intraday, etc (Upstox)
             "validity": validity,
             "price": price if price is not None else 0,
-            "tag": os.getenv("UPSTOX_ORDER_TAG", "trading-dashboard"),
+            "tag": (client_order_id or os.getenv("UPSTOX_ORDER_TAG", "trading-dashboard")),
             "instrument_token": instrument_key,
             "order_type": order_type,
             "transaction_type": transaction_type,
@@ -129,6 +149,9 @@ class UpstoxBroker:
 
 def broker_from_env(symbol_master: Optional[SymbolMasterService] = None) -> Optional[UpstoxBroker]:
     token = os.getenv("UPSTOX_ACCESS_TOKEN", "").strip()
-    if not token:
-        return None
-    return UpstoxBroker(access_token=token, symbol_master=symbol_master)
+    if token:
+        return UpstoxBroker(access_token=token, symbol_master=symbol_master)
+    # OAuth mode: only create broker if required OAuth env vars exist.
+    if os.getenv("UPSTOX_API_KEY", "").strip() and os.getenv("UPSTOX_API_SECRET", "").strip():
+        return UpstoxBroker(access_token="", symbol_master=symbol_master)
+    return None

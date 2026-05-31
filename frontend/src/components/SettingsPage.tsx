@@ -35,6 +35,9 @@ export function SettingsPage() {
   const [loading, setLoading] = useState(true);
   const [killEnabled, setKillEnabled] = useState<boolean | null>(null);
   const [adminKey, setAdminKey] = useState<string>(() => localStorage.getItem('admin_api_key') || '');
+  const [dashboardToken, setDashboardToken] = useState<string>(() => localStorage.getItem('dashboard_jwt') || '');
+  const [loginUsername, setLoginUsername] = useState<string>('admin');
+  const [loginPassword, setLoginPassword] = useState<string>('');
   const [killBusy, setKillBusy] = useState(false);
 
   const safeJson = async (res: Response) => {
@@ -72,6 +75,51 @@ export function SettingsPage() {
     localStorage.setItem('admin_api_key', adminKey);
   }, [adminKey]);
 
+  useEffect(() => {
+    localStorage.setItem('dashboard_jwt', dashboardToken);
+  }, [dashboardToken]);
+
+  const authHeaders = (): Record<string, string> => {
+    if (dashboardToken) {
+      return { Authorization: `Bearer ${dashboardToken}` };
+    }
+    if (adminKey) {
+      return { 'X-Admin-Key': adminKey };
+    }
+    return {};
+  };
+
+  const handleLogin = async () => {
+    try {
+      const form = new URLSearchParams();
+      form.append('username', loginUsername);
+      form.append('password', loginPassword);
+      const res = await fetch(`${API_URL}/login`, {
+        method: 'POST',
+        body: form,
+      });
+      const data = await safeJson(res);
+      if (!res.ok) {
+        throw new Error(String(data?.detail || data?.raw || `HTTP ${res.status}`));
+      }
+      if (data?.access_token) {
+        setDashboardToken(String(data.access_token));
+        setLoginPassword('');
+        alert('JWT login successful');
+      } else {
+        throw new Error('Login response missing access_token');
+      }
+    } catch (error) {
+      console.error('Login failed:', error);
+      alert('Login failed');
+    }
+  };
+
+  const handleLogout = () => {
+    setDashboardToken('');
+    localStorage.removeItem('dashboard_jwt');
+  };
+
   const toggleKillSwitch = async (enabled: boolean) => {
     setKillBusy(true);
     try {
@@ -79,7 +127,7 @@ export function SettingsPage() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(adminKey ? { 'X-Admin-Key': adminKey } : {}),
+          ...authHeaders(),
         },
         body: JSON.stringify({ enabled }),
       });
@@ -90,7 +138,7 @@ export function SettingsPage() {
       setKillEnabled(Boolean(data?.trading_enabled));
     } catch (error) {
       console.error('Kill switch update failed:', error);
-      alert('Kill switch update failed (check ADMIN_API_KEY / auth settings).');
+      alert('Kill switch update failed (check JWT login / auth settings).');
     } finally {
       setKillBusy(false);
     }
@@ -217,19 +265,59 @@ export function SettingsPage() {
       </section>
 
       <section className="mb-8 bg-gray-900 p-6 rounded-lg">
-        <h2 className="text-xl font-bold mb-4">Kill Switch</h2>
+        <h2 className="text-xl font-bold mb-4">Dashboard Login</h2>
         <div className="text-sm text-gray-400 mb-3">
-          If JWT auth is disabled on the server, you must set `ADMIN_API_KEY` on Render and enter it here.
+          Sign in with a dashboard user to receive a JWT for admin actions. The legacy admin key still works as a fallback.
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm mb-2">Admin Key (X-Admin-Key)</label>
+            <label className="block text-sm mb-2">Username</label>
+            <input
+              type="text"
+              value={loginUsername}
+              onChange={(e) => setLoginUsername(e.target.value)}
+              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2"
+              placeholder="admin"
+            />
+          </div>
+          <div>
+            <label className="block text-sm mb-2">Password</label>
+            <input
+              type="password"
+              value={loginPassword}
+              onChange={(e) => setLoginPassword(e.target.value)}
+              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2"
+              placeholder="••••••••"
+            />
+          </div>
+        </div>
+        <div className="mt-4 flex flex-wrap gap-2 items-center">
+          <button onClick={handleLogin} className="px-4 py-2 bg-blue-600 rounded hover:bg-blue-700 text-sm">
+            Login
+          </button>
+          <button onClick={handleLogout} className="px-4 py-2 bg-gray-700 rounded hover:bg-gray-600 text-sm">
+            Logout
+          </button>
+          <div className="text-sm text-gray-400">
+            {dashboardToken ? 'JWT active' : 'No JWT stored'}
+          </div>
+        </div>
+      </section>
+
+      <section className="mb-8 bg-gray-900 p-6 rounded-lg">
+        <h2 className="text-xl font-bold mb-4">Kill Switch</h2>
+        <div className="text-sm text-gray-400 mb-3">
+          Use the dashboard JWT first. If needed, the legacy `ADMIN_API_KEY` fallback still works.
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm mb-2">Legacy Admin Key (X-Admin-Key)</label>
             <input
               type="password"
               value={adminKey}
               onChange={(e) => setAdminKey(e.target.value)}
               className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2"
-              placeholder="ADMIN_API_KEY"
+              placeholder="Legacy fallback"
             />
           </div>
           <div className="flex items-end gap-2">

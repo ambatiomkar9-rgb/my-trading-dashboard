@@ -89,7 +89,6 @@ def load_jwt_auth() -> Optional[JwtAuth]:
     secret = os.getenv("JWT_SECRET_KEY", "").strip()
     if not secret:
         return None
-    ttl = int(os.getenv("JWT_ACCESS_TTL_SEC", "3600"))
+    ttl = int(os.getenv("JWT_ACCESS_TTL_SEC", "28800"))
     issuer = os.getenv("JWT_ISSUER", "trading-dashboard")
     return JwtAuth(JwtConfig(secret_key=secret, access_token_ttl_sec=ttl, issuer=issuer))
-
