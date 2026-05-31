@@ -15,10 +15,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
-from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -1017,9 +1016,12 @@ async def set_kill_switch(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.post("/login")
-async def login(form: OAuth2PasswordRequestForm = Depends()) -> dict[str, Any]:
+async def login(
+    username: str = Form(...),
+    password: str = Form(...),
+) -> dict[str, Any]:
     """Return a JWT after verifying the username/password pair."""
-    user = verify_user(form.username, form.password)
+    user = verify_user(username, password)
     if not user:
         raise HTTPException(status_code=401, detail="Incorrect username or password")
     token = create_token(user["username"], user.get("role", "user"))
