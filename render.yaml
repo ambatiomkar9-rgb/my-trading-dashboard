@@ -3,9 +3,9 @@ services:
     name: trading-dashboard
     env: python
     plan: free
-    rootDir: trading-dashboard
-    buildCommand: bash build.sh
-    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    rootDir: . # Changed to project root
+    buildCommand: bash ./build.sh # Use the new root-level build.sh
+    startCommand: uvicorn trading_system.main:app --host 0.0.0.0 --port $PORT # Run our main app
     envVars:
       - key: PORT
         value: "8000"
@@ -15,5 +15,5 @@ services:
         value: "false"
     disk:
       name: trading-db
-      mountPath: /opt/render/project/src/trading-dashboard/data
+      mountPath: /opt/render/project/src/trading_system/data # Adjusted mount path
       sizeGB: 1
