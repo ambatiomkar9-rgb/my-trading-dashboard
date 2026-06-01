@@ -1,0 +1,74 @@
+version: '3.8'
+
+services:
+  postgres-live:
+    image: postgres:15-alpine
+    container_name: hermes-postgres-live
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: hermes_live
+      POSTGRES_USER: hermes_user
+      POSTGRES_PASSWORD: ${POSTGRES_LIVE_PASSWORD}
+    volumes:
+      - postgres_live_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-HELL", "pg_isready -U hermes_user -d hermes_live"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: always
+
+  postgres-research:
+    image: postgres:15-alpine
+    container_name: hermes-postgres-research
+    ports:
+      - "5433:5432" # Map to different host port
+    environment:
+      POSTGRES_DB: hermes_research
+      POSTGRES_USER: hermes_research_user
+      POSTGRES_PASSWORD: ${POSTGRES_RESEARCH_PASSWORD}
+    volumes:
+      - postgres_research_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-HELL", "pg_isready -U hermes_research_user -d hermes_research"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: always
+
+  redis:
+    image: redis:7-alpine
+    container_name: hermes-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: always
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: hermes-nats
+    ports:
+      - "4222:4222" # Client port
+      - "8222:8222" # Monitoring port
+    command: -js # Enable JetStream
+    volumes:
+      - nats_data:/data
+    healthcheck:
+      test: ["CMD", "nats", "health", "check", "--server", "nats://localhost:4222"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: always
+
+volumes:
+  postgres_live_data:
+  postgres_research_data:
+  redis_data:
+  nats_data:
