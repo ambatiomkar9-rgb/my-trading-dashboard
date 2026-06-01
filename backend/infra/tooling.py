@@ -25,6 +25,10 @@ class ToolingConfig:
     sentry_environment: str
     sentry_traces_sample_rate: float
     healthcheck_path: str
+    hermes_enabled: bool
+    hermes_timeout_sec: int
+    hermes_poll_interval: int
+    strategy_gen_interval: int
 
 
 def _env(name: str, default: str = "") -> str:
@@ -54,6 +58,10 @@ def load_tooling_config() -> ToolingConfig:
         sentry_environment=_env("SENTRY_ENVIRONMENT", _env("TRADING_ENV", "local")),
         sentry_traces_sample_rate=_env_float("SENTRY_TRACES_SAMPLE_RATE", 0.0),
         healthcheck_path=_env("HEALTHCHECK_PATH", "/health"),
+        hermes_enabled=_env("HERMES_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
+        hermes_timeout_sec=int(_env("HERMES_TIMEOUT_SEC", "120")),
+        hermes_poll_interval=int(_env("HERMES_POLL_INTERVAL", "60")),
+        strategy_gen_interval=int(_env("STRATEGY_GEN_INTERVAL", "300")),
     )
 
 

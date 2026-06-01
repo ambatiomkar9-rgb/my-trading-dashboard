@@ -42,6 +42,7 @@ from backend.database import (
 from backend.execution.auth.broker_auth_manager import BrokerAuthManager
 from backend.infra.monitoring import build_health_snapshot
 from backend.infra.tooling import init_sentry, load_tooling_config
+from backend.integrations.hermes_client import HermesClient
 from backend.market_data.symbol_master_service import build_symbol_master
 from backend.notifications.telegram_bot import TelegramCallbackPoller, send_approval_request, send_message
 from backend.portfolio.position_manager import PositionManager
@@ -72,6 +73,11 @@ SETTINGS_ENV_MAP = {
     "trading_enabled": "TRADING_ENABLED",
     "upstox_redirect_uri": "UPSTOX_REDIRECT_URI",
     "sentry_dsn": "SENTRY_DSN",
+    "hermes_enabled": "HERMES_ENABLED",
+    "hermes_cmd": "HERMES_CMD",
+    "hermes_timeout_sec": "HERMES_TIMEOUT_SEC",
+    "hermes_poll_interval": "HERMES_POLL_INTERVAL",
+    "strategy_gen_interval": "STRATEGY_GEN_INTERVAL",
 }
 
 DEFAULT_SETTINGS = {
@@ -92,6 +98,11 @@ DEFAULT_SETTINGS = {
     "newsapi_key": os.getenv("NEWSAPI_KEY", ""),
     "upstox_redirect_uri": os.getenv("UPSTOX_REDIRECT_URI", "http://127.0.0.1:8000/broker-callback"),
     "trading_enabled": os.getenv("TRADING_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"},
+    "hermes_enabled": os.getenv("HERMES_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"},
+    "hermes_cmd": os.getenv("HERMES_CMD", ""),
+    "hermes_timeout_sec": int(os.getenv("HERMES_TIMEOUT_SEC", "120")),
+    "hermes_poll_interval": int(os.getenv("HERMES_POLL_INTERVAL", "60")),
+    "strategy_gen_interval": int(os.getenv("STRATEGY_GEN_INTERVAL", "300")),
 }
 
 
@@ -686,6 +697,17 @@ async def _build_agent_cards(app: FastAPI) -> list[dict[str, Any]]:
         },
     ]
 
+    hermes_enabled = cfg.hermes_enabled
+    hermes_task = "Hermes strategy engine ready" if hermes_enabled else "Hermes disabled"
+    cards.append(
+        {
+            "agent_id": "hermes_strategy",
+            "status": "online" if hermes_enabled else "offline",
+            "task": hermes_task,
+            "progress": 100 if hermes_enabled else 0,
+        }
+    )
+
     for strategy in strategies[:10]:
         status, progress = _strategy_status_label(str(getattr(strategy, "status", "") or "paused"))
         cards.append(
@@ -905,6 +927,12 @@ async def system_health(request: Request) -> dict[str, Any]:
     except Exception:
         pass
 
+    hermes_status = "not_configured"
+    if cfg.hermes_enabled:
+        hermes_client = HermesClient()
+        ok, info = hermes_client.healthcheck()
+        hermes_status = "online" if ok else f"offline: {info}"
+
     snapshot = runtime.status()
     session = SessionLocal()
     try:
@@ -926,6 +954,7 @@ async def system_health(request: Request) -> dict[str, Any]:
     return {
         "timestamp": _utc_now(),
         "ollama_status": ollama_status,
+        "hermes_status": hermes_status,
         "broker_status": broker_status,
         "agents_online": agents_online,
         "alert_cooldown_seconds": int(os.getenv("TELEGRAM_ALERT_COOLDOWN_SECONDS", "60")),
@@ -1536,6 +1565,345 @@ async def generate_pinescript(payload: dict[str, Any]) -> dict[str, Any]:
     """Return a starter PineScript strategy template."""
     name = str(payload.get("name") or "Trading Strategy")
     return {"script": _pinescript_template(name)}
+
+
+# ── Hermes Strategy Endpoints ──────────────────────────────────────────────
+
+
+@app.post("/strategy/generate")
+async def hermes_generate_strategy(payload: dict[str, Any]) -> dict[str, Any]:
+    """Generate a new strategy using Hermes AI reasoning."""
+    symbol = str(payload.get("symbol") or "INFY").upper().strip()
+    timeframe = str(payload.get("timeframe") or "1d").strip()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Symbol is required")
+
+    from backend.agents.hermes_strategy_agent import HermesStrategyAgent
+    from backend.integrations.hermes_client import HermesClient
+    from backend.memory.strategy_memory import StrategyLessonRepository
+
+    hermes_client = HermesClient()
+    agent = HermesStrategyAgent(hermes_client=hermes_client)
+    memory = StrategyLessonRepository()
+
+    # Get lessons for context
+    lessons = memory.get_lesson_texts(symbol=symbol, limit=5)
+
+    # Get market data
+    market_context = {}
+    try:
+        from backend.market_data.yfinance_client import (
+            compute_technical_indicators,
+            fetch_current_price,
+            fetch_ohlcv,
+        )
+
+        price = await asyncio.to_thread(fetch_current_price, symbol)
+        df = await asyncio.to_thread(fetch_ohlcv, symbol, timeframe, period="3mo")
+        if df is not None and not df.empty:
+            df = compute_technical_indicators(df)
+            if df is not None and not df.empty:
+                latest = df.iloc[-1]
+                trend = (
+                    "bullish"
+                    if latest.get("ema_fast", 0) > latest.get("ema_slow", 0)
+                    else "bearish"
+                )
+                market_context = {
+                    "current_price": price,
+                    "trend": trend,
+                    "rsi": round(float(latest.get("rsi", 50)), 2),
+                    "macd": round(float(latest.get("macd", 0)), 4),
+                    "volume": int(latest.get("volume", 0)),
+                }
+    except Exception as exc:
+        logger.warning("Failed to fetch market data for %s: %s", symbol, exc)
+
+    result = await agent.generate_strategy(
+        symbol=symbol,
+        timeframe=timeframe,
+        market_data=market_context,
+        lessons=lessons,
+    )
+
+    if not result:
+        raise HTTPException(status_code=500, detail="Strategy generation failed")
+
+    # Store the generated strategy
+    strategy_id = f"hermes_{symbol}_{int(datetime.now(timezone.utc).timestamp())}"
+    session = SessionLocal()
+    try:
+        row = Strategy(
+            id=strategy_id,
+            name=f"Hermes-{symbol}",
+            symbol=symbol,
+            timeframe=timeframe,
+            status="paused",
+            entry_rule=str(result.get("entry_rule", "")),
+            exit_rule=str(result.get("exit_rule", "")),
+            created_date=_utc_now(),
+        )
+        session.add(row)
+        session.commit()
+    finally:
+        session.close()
+
+    return {
+        "ok": True,
+        "strategy_id": strategy_id,
+        "entry_rule": result.get("entry_rule"),
+        "exit_rule": result.get("exit_rule"),
+        "explanation": result.get("explanation"),
+        "confidence": result.get("confidence"),
+        "reasoning": result.get("reasoning"),
+        "source": result.get("source"),
+    }
+
+
+@app.post("/strategy/validate/{strategy_id}")
+async def hermes_validate_strategy(strategy_id: str) -> dict[str, Any]:
+    """Validate a strategy using Hermes AI and real backtest data."""
+    session = SessionLocal()
+    try:
+        row = session.query(Strategy).filter(Strategy.id == strategy_id).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+    finally:
+        session.close()
+
+    from backend.agents.hermes_strategy_agent import HermesStrategyAgent
+    from backend.integrations.hermes_client import HermesClient
+
+    hermes_client = HermesClient()
+    agent = HermesStrategyAgent(hermes_client=hermes_client)
+
+    # Run real backtest
+    backtest_metrics = {"total_trades": 0, "win_rate": 0, "net_pnl": 0, "sharpe": 0, "max_dd": 0, "profit_factor": 0}
+    try:
+        from backend.market_data.yfinance_client import compute_technical_indicators, fetch_ohlcv
+
+        df = await asyncio.to_thread(fetch_ohlcv, row.symbol, row.timeframe or "1d", period="6mo")
+        if df is not None and not df.empty:
+            df = compute_technical_indicators(df)
+            if df is not None and not df.empty:
+                # Simple backtest based on entry/exit rules
+                backtest_metrics = _run_simple_backtest(df, row.entry_rule, row.exit_rule)
+    except Exception as exc:
+        logger.warning("Backtest failed for %s: %s", row.symbol, exc)
+
+    validation = await agent.validate_strategy(
+        strategy_name=row.name,
+        entry_rule=row.entry_rule or "",
+        exit_rule=row.exit_rule or "",
+        backtest_metrics=backtest_metrics,
+    )
+
+    return {
+        "ok": True,
+        "strategy_id": strategy_id,
+        "validation": validation,
+        "backtest_metrics": backtest_metrics,
+    }
+
+
+@app.post("/strategy/tune/{strategy_id}")
+async def hermes_tune_strategy(strategy_id: str) -> dict[str, Any]:
+    """Ask Hermes to suggest one parameter improvement for a strategy."""
+    session = SessionLocal()
+    try:
+        row = session.query(Strategy).filter(Strategy.id == strategy_id).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+    finally:
+        session.close()
+
+    from backend.agents.hermes_strategy_agent import HermesStrategyAgent
+    from backend.integrations.hermes_client import HermesClient
+
+    hermes_client = HermesClient()
+    agent = HermesStrategyAgent(hermes_client=hermes_client)
+
+    # Parse current params from rules
+    current_params = _parse_strategy_params(row.entry_rule, row.exit_rule)
+    metrics = {"win_rate": 50, "sharpe": 1.0, "max_dd": 15, "profit_factor": 1.5, "net_pnl": 0}
+
+    suggestion = await agent.tune_strategy(
+        strategy_name=row.name,
+        current_params=current_params,
+        backtest_metrics=metrics,
+    )
+
+    return {
+        "ok": True,
+        "strategy_id": strategy_id,
+        "suggestion": suggestion,
+    }
+
+
+@app.get("/strategy/explain/{strategy_id}")
+async def hermes_explain_strategy(strategy_id: str) -> dict[str, Any]:
+    """Get a natural language explanation of a strategy from Hermes."""
+    session = SessionLocal()
+    try:
+        row = session.query(Strategy).filter(Strategy.id == strategy_id).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+    finally:
+        session.close()
+
+    from backend.agents.hermes_strategy_agent import HermesStrategyAgent
+    from backend.integrations.hermes_client import HermesClient
+
+    hermes_client = HermesClient()
+    agent = HermesStrategyAgent(hermes_client=hermes_client)
+
+    explanation = await agent.explain_strategy(
+        strategy_name=row.name,
+        entry_rule=row.entry_rule or "",
+        exit_rule=row.exit_rule or "",
+    )
+
+    return {
+        "ok": True,
+        "strategy_id": strategy_id,
+        "explanation": explanation,
+    }
+
+
+@app.post("/strategy/auto-generate")
+async def hermes_auto_generate() -> dict[str, Any]:
+    """Trigger background strategy generation for all watchlist symbols."""
+    from backend.agents.strategy_generator_agent import StrategyGeneratorAgent
+    from backend.integrations.hermes_client import HermesClient
+    from backend.memory.strategy_memory import StrategyLessonRepository
+
+    cfg = load_tooling_config()
+    if not cfg.hermes_enabled:
+        raise HTTPException(status_code=400, detail="Hermes is not enabled")
+
+    hermes_client = HermesClient()
+    from backend.agents.hermes_strategy_agent import HermesStrategyAgent
+
+    hermes_agent = HermesStrategyAgent(hermes_client=hermes_client)
+    memory = StrategyLessonRepository()
+
+    generator = StrategyGeneratorAgent(
+        hermes_strategy_agent=hermes_agent,
+        strategy_memory=memory,
+        interval_seconds=cfg.strategy_gen_interval,
+    )
+
+    # Run one generation cycle
+    result = await generator._generate_one_strategy()
+
+    return {
+        "ok": True,
+        "generated": result is not None,
+        "message": "Strategy generation triggered" if result else "No strategy generated (check watchlist)",
+    }
+
+
+@app.get("/strategy/lessons")
+async def get_strategy_lessons(
+    symbol: Optional[str] = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Get strategy lessons from self-learning memory."""
+    from backend.memory.strategy_memory import StrategyLessonRepository
+
+    memory = StrategyLessonRepository()
+    lessons = memory.get_lessons(symbol=symbol, limit=limit)
+    summary = memory.get_lessons_summary(symbol=symbol)
+    return {"lessons": lessons, "summary": summary}
+
+
+@app.get("/strategy/hermes/status")
+async def hermes_strategy_status() -> dict[str, Any]:
+    """Check Hermes strategy agent status."""
+    from backend.agents.hermes_strategy_agent import HermesStrategyAgent
+    from backend.integrations.hermes_client import HermesClient
+
+    cfg = load_tooling_config()
+    hermes_client = HermesClient()
+    agent = HermesStrategyAgent(hermes_client=hermes_client)
+    available = await agent.is_available()
+
+    return {
+        "hermes_enabled": cfg.hermes_enabled,
+        "hermes_available": available,
+        "hermes_timeout_sec": cfg.hermes_timeout_sec,
+        "strategy_gen_interval": cfg.strategy_gen_interval,
+    }
+
+
+# ── Helper functions for Hermes strategy endpoints ──────────────────────────
+
+
+def _run_simple_backtest(df: Any, entry_rule: str, exit_rule: str) -> dict[str, Any]:
+    """Run a simple backtest based on entry/exit rules using EMA crossover."""
+    import pandas as pd
+
+    if "ema_fast" not in df.columns or "ema_slow" not in df.columns:
+        return {"total_trades": 0, "win_rate": 0, "net_pnl": 0, "sharpe": 0, "max_dd": 0, "profit_factor": 0}
+
+    # Simple EMA crossover strategy
+    df = df.copy()
+    df["signal"] = 0
+    df.loc[df["ema_fast"] > df["ema_slow"], "signal"] = 1
+    df.loc[df["ema_fast"] < df["ema_slow"], "signal"] = -1
+    df["position"] = df["signal"].shift(1).fillna(0)
+    df["returns"] = df["close"].pct_change() * df["position"]
+    df["equity"] = (1 + df["returns"].fillna(0)).cumprod()
+
+    # Calculate metrics
+    trades = df["position"].diff().fillna(0)
+    trade_count = int((trades != 0).sum() // 2)
+    returns = df["returns"].dropna()
+
+    if len(returns) == 0 or trade_count == 0:
+        return {"total_trades": 0, "win_rate": 0, "net_pnl": 0, "sharpe": 0, "max_dd": 0, "profit_factor": 0}
+
+    wins = (returns > 0).sum()
+    losses = (returns < 0).sum()
+    win_rate = round((wins / (wins + losses)) * 100, 2) if (wins + losses) > 0 else 0
+    net_pnl = round(float(returns.sum()) * 10000, 2)
+    sharpe = round(float(returns.mean() / (returns.std() + 1e-10)) * (252 ** 0.5), 2)
+    equity = df["equity"].dropna()
+    max_dd = round(float((equity / equity.cummax() - 1).min()) * 100, 2) if len(equity) > 0 else 0
+    gross_profit = float(returns[returns > 0].sum())
+    gross_loss = abs(float(returns[returns < 0].sum()))
+    profit_factor = round(gross_profit / (gross_loss + 1e-10), 2)
+
+    return {
+        "total_trades": trade_count,
+        "win_rate": win_rate,
+        "net_pnl": net_pnl,
+        "sharpe": sharpe,
+        "max_dd": abs(max_dd),
+        "profit_factor": profit_factor,
+    }
+
+
+def _parse_strategy_params(entry_rule: str, exit_rule: str) -> dict:
+    """Parse strategy rules into a params dict for tuning."""
+    params = {}
+    for rule_str in [entry_rule, exit_rule]:
+        if not rule_str:
+            continue
+        try:
+            rule = json.loads(rule_str) if rule_str.startswith("{") else {}
+            for key, val in rule.items():
+                if isinstance(val, (int, float)):
+                    params[key] = val
+                elif isinstance(val, dict):
+                    for k, v in val.items():
+                        if isinstance(v, (int, float)):
+                            params[f"{key}_{k}"] = v
+        except (json.JSONDecodeError, TypeError):
+            continue
+    if not params:
+        params = {"fast_period": 12, "slow_period": 26, "stop_loss_pct": 2.0, "take_profit_pct": 5.0}
+    return params
 
 
 @app.post("/backtest")

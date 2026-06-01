@@ -14,3 +14,6 @@ passlib>=1.7.4
 textblob>=0.17.1
 psycopg2-binary>=2.9.9
 sentry-sdk>=2.20.0
+yfinance>=0.2.54
+pandas>=2.2.0
+numpy>=1.26.0

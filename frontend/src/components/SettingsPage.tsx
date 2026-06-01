@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from 'react';
+import { useAuth } from '../auth/AuthContext';
+import { api } from '../api';
 
 const API_URL = '';
 
@@ -15,9 +17,15 @@ type Settings = {
   telegram_enabled?: boolean;
   telegram_bot_token?: string;
   telegram_chat_id?: string;
+  hermes_enabled?: boolean;
+  hermes_cmd?: string;
+  hermes_timeout_sec?: number;
+  hermes_poll_interval?: number;
+  strategy_gen_interval?: number;
 };
 
 export function SettingsPage() {
+  const { isAuthenticated, username, logout } = useAuth();
   const [settings, setSettings] = useState<Settings>({
     broker: 'upstox',
     trading_mode: 'paper',
@@ -35,9 +43,6 @@ export function SettingsPage() {
   const [loading, setLoading] = useState(true);
   const [killEnabled, setKillEnabled] = useState<boolean | null>(null);
   const [adminKey, setAdminKey] = useState<string>(() => localStorage.getItem('admin_api_key') || '');
-  const [dashboardToken, setDashboardToken] = useState<string>(() => localStorage.getItem('dashboard_jwt') || '');
-  const [loginUsername, setLoginUsername] = useState<string>('admin');
-  const [loginPassword, setLoginPassword] = useState<string>('');
   const [killBusy, setKillBusy] = useState(false);
 
   const safeJson = async (res: Response) => {
@@ -75,49 +80,11 @@ export function SettingsPage() {
     localStorage.setItem('admin_api_key', adminKey);
   }, [adminKey]);
 
-  useEffect(() => {
-    localStorage.setItem('dashboard_jwt', dashboardToken);
-  }, [dashboardToken]);
-
   const authHeaders = (): Record<string, string> => {
-    if (dashboardToken) {
-      return { Authorization: `Bearer ${dashboardToken}` };
-    }
     if (adminKey) {
       return { 'X-Admin-Key': adminKey };
     }
     return {};
-  };
-
-  const handleLogin = async () => {
-    try {
-      const form = new URLSearchParams();
-      form.append('username', loginUsername);
-      form.append('password', loginPassword);
-      const res = await fetch(`${API_URL}/login`, {
-        method: 'POST',
-        body: form,
-      });
-      const data = await safeJson(res);
-      if (!res.ok) {
-        throw new Error(String(data?.detail || data?.raw || `HTTP ${res.status}`));
-      }
-      if (data?.access_token) {
-        setDashboardToken(String(data.access_token));
-        setLoginPassword('');
-        alert('JWT login successful');
-      } else {
-        throw new Error('Login response missing access_token');
-      }
-    } catch (error) {
-      console.error('Login failed:', error);
-      alert('Login failed');
-    }
-  };
-
-  const handleLogout = () => {
-    setDashboardToken('');
-    localStorage.removeItem('dashboard_jwt');
   };
 
   const toggleKillSwitch = async (enabled: boolean) => {
@@ -265,42 +232,19 @@ export function SettingsPage() {
       </section>
 
       <section className="mb-8 bg-gray-900 p-6 rounded-lg">
-        <h2 className="text-xl font-bold mb-4">Dashboard Login</h2>
+        <h2 className="text-xl font-bold mb-4">Dashboard Auth</h2>
         <div className="text-sm text-gray-400 mb-3">
-          Sign in with a dashboard user to receive a JWT for admin actions. The legacy admin key still works as a fallback.
+          Authentication is handled via the shared auth layer. You are logged in as <strong className="text-white">{username}</strong>.
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div>
-            <label className="block text-sm mb-2">Username</label>
-            <input
-              type="text"
-              value={loginUsername}
-              onChange={(e) => setLoginUsername(e.target.value)}
-              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2"
-              placeholder="admin"
-            />
-          </div>
-          <div>
-            <label className="block text-sm mb-2">Password</label>
-            <input
-              type="password"
-              value={loginPassword}
-              onChange={(e) => setLoginPassword(e.target.value)}
-              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2"
-              placeholder="••••••••"
-            />
-          </div>
-        </div>
-        <div className="mt-4 flex flex-wrap gap-2 items-center">
-          <button onClick={handleLogin} className="px-4 py-2 bg-blue-600 rounded hover:bg-blue-700 text-sm">
-            Login
-          </button>
-          <button onClick={handleLogout} className="px-4 py-2 bg-gray-700 rounded hover:bg-gray-600 text-sm">
-            Logout
-          </button>
+        <div className="flex items-center gap-4">
           <div className="text-sm text-gray-400">
-            {dashboardToken ? 'JWT active' : 'No JWT stored'}
+            Status: <span className={isAuthenticated ? 'text-green-400' : 'text-red-400'}>{isAuthenticated ? 'Authenticated' : 'Not authenticated'}</span>
           </div>
+          {isAuthenticated && (
+            <button onClick={logout} className="px-4 py-2 bg-gray-700 rounded hover:bg-gray-600 text-sm">
+              Logout
+            </button>
+          )}
         </div>
       </section>
 
@@ -451,6 +395,54 @@ export function SettingsPage() {
         </button>
         <div className="mt-2 text-xs text-gray-400">
           Buy alerts have a 60 second cooldown per symbol (configured by `TELEGRAM_ALERT_COOLDOWN_SECONDS`).
+        </div>
+      </section>
+
+      <section className="mb-8 bg-gray-900 p-6 rounded-lg">
+        <h2 className="text-xl font-bold mb-4">Hermes AI Strategy Engine</h2>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm mb-2">Hermes Enabled</label>
+            <select
+              value={String(settings.hermes_enabled ?? true)}
+              onChange={(e) => setSettings({ ...settings, hermes_enabled: e.target.value === 'true' })}
+              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2"
+            >
+              <option value="true">Enabled</option>
+              <option value="false">Disabled</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm mb-2">Hermes Command (optional override)</label>
+            <input
+              type="text"
+              value={settings.hermes_cmd || ''}
+              onChange={(e) => setSettings({ ...settings, hermes_cmd: e.target.value })}
+              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2"
+              placeholder="wsl hermes"
+            />
+          </div>
+          <div>
+            <label className="block text-sm mb-2">Timeout (seconds)</label>
+            <input
+              type="number"
+              value={settings.hermes_timeout_sec ?? 120}
+              onChange={(e) => setSettings({ ...settings, hermes_timeout_sec: parseInt(e.target.value) })}
+              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2"
+            />
+          </div>
+          <div>
+            <label className="block text-sm mb-2">Strategy Gen Interval (seconds)</label>
+            <input
+              type="number"
+              value={settings.strategy_gen_interval ?? 300}
+              onChange={(e) => setSettings({ ...settings, strategy_gen_interval: parseInt(e.target.value) })}
+              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2"
+            />
+          </div>
+        </div>
+        <div className="mt-4 text-xs text-gray-400">
+          Hermes powers AI strategy generation, validation, tuning, and explanation. Requires Hermes Agent installed locally or via SSH.
         </div>
       </section>
 

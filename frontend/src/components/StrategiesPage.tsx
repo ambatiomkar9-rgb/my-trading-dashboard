@@ -13,6 +13,23 @@ interface Strategy {
   win_rate: number;
   total_trades: number;
   equity_curve: Array<{ date: string; value: number }>;
+  entry_rule?: string;
+  exit_rule?: string;
+}
+
+interface HermesValidation {
+  score: number;
+  verdict: string;
+  reasoning: string;
+  suggestions: string[];
+  source: string;
+}
+
+interface HermesSuggestion {
+  param: string;
+  value: number | string;
+  reasoning: string;
+  source: string;
 }
 
 export function StrategiesPage() {
@@ -32,8 +49,27 @@ export function StrategiesPage() {
   const [pineScript, setPineScript] = useState('');
   const [pineError, setPineError] = useState<string | null>(null);
 
+  // Hermes state
+  const [hermesGenerating, setHermesGenerating] = useState(false);
+  const [hermesGenerateResult, setHermesGenerateResult] = useState<any>(null);
+  const [hermesGenerateError, setHermesGenerateError] = useState<string | null>(null);
+  const [hermesValidating, setHermesValidating] = useState(false);
+  const [hermesValidation, setHermesValidation] = useState<HermesValidation | null>(null);
+  const [hermesTuning, setHermesTuning] = useState(false);
+  const [hermesSuggestion, setHermesSuggestion] = useState<HermesSuggestion | null>(null);
+  const [hermesExplaining, setHermesExplaining] = useState(false);
+  const [hermesExplanation, setHermesExplanation] = useState<string | null>(null);
+  const [hermesAutoGenerating, setHermesAutoGenerating] = useState(false);
+  const [hermesStatus, setHermesStatus] = useState<any>(null);
+
+  // Generate form state
+  const [showGenerateForm, setShowGenerateForm] = useState(false);
+  const [generateSymbol, setGenerateSymbol] = useState('INFY');
+  const [generateTimeframe, setGenerateTimeframe] = useState('1d');
+
   useEffect(() => {
     fetchStrategies();
+    fetchHermesStatus();
   }, []);
 
   const safeJson = async (res: Response) => {
@@ -56,6 +92,16 @@ export function StrategiesPage() {
       console.error('Error fetching strategies:', error);
       setStrategies([]);
       setSelected(null);
+    }
+  };
+
+  const fetchHermesStatus = async () => {
+    try {
+      const res = await fetch(`${API_URL}/strategy/hermes/status`);
+      const data = await safeJson(res);
+      setHermesStatus(data);
+    } catch (error) {
+      console.error('Error fetching Hermes status:', error);
     }
   };
 
@@ -130,18 +176,186 @@ export function StrategiesPage() {
     }
   };
 
+  // ── Hermes Actions ──────────────────────────────────────────────────────
+
+  const hermesGenerate = async () => {
+    setHermesGenerating(true);
+    setHermesGenerateResult(null);
+    setHermesGenerateError(null);
+    try {
+      const res = await fetch(`${API_URL}/strategy/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol: generateSymbol, timeframe: generateTimeframe }),
+      });
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(String(data?.detail || data?.raw || `HTTP ${res.status}`));
+      setHermesGenerateResult(data);
+      setShowGenerateForm(false);
+      await fetchStrategies();
+    } catch (e: any) {
+      setHermesGenerateError(e?.message || 'Failed to generate strategy');
+    } finally {
+      setHermesGenerating(false);
+    }
+  };
+
+  const hermesValidate = async (strategyId: string) => {
+    setHermesValidating(true);
+    setHermesValidation(null);
+    try {
+      const res = await fetch(`${API_URL}/strategy/validate/${encodeURIComponent(strategyId)}`, {
+        method: 'POST',
+      });
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(String(data?.detail || data?.raw || `HTTP ${res.status}`));
+      setHermesValidation(data?.validation || null);
+    } catch (e: any) {
+      console.error('Validation error:', e);
+    } finally {
+      setHermesValidating(false);
+    }
+  };
+
+  const hermesTune = async (strategyId: string) => {
+    setHermesTuning(true);
+    setHermesSuggestion(null);
+    try {
+      const res = await fetch(`${API_URL}/strategy/tune/${encodeURIComponent(strategyId)}`, {
+        method: 'POST',
+      });
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(String(data?.detail || data?.raw || `HTTP ${res.status}`));
+      setHermesSuggestion(data?.suggestion || null);
+    } catch (e: any) {
+      console.error('Tune error:', e);
+    } finally {
+      setHermesTuning(false);
+    }
+  };
+
+  const hermesExplain = async (strategyId: string) => {
+    setHermesExplaining(true);
+    setHermesExplanation(null);
+    try {
+      const res = await fetch(`${API_URL}/strategy/explain/${encodeURIComponent(strategyId)}`);
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(String(data?.detail || data?.raw || `HTTP ${res.status}`));
+      setHermesExplanation(data?.explanation || 'No explanation available');
+    } catch (e: any) {
+      console.error('Explain error:', e);
+    } finally {
+      setHermesExplaining(false);
+    }
+  };
+
+  const hermesAutoGenerate = async () => {
+    setHermesAutoGenerating(true);
+    try {
+      const res = await fetch(`${API_URL}/strategy/auto-generate`, { method: 'POST' });
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(String(data?.detail || data?.raw || `HTTP ${res.status}`));
+      alert(data?.message || 'Auto-generation triggered');
+      await fetchStrategies();
+    } catch (e: any) {
+      alert(e?.message || 'Failed to trigger auto-generation');
+    } finally {
+      setHermesAutoGenerating(false);
+    }
+  };
+
+  // ── Render ──────────────────────────────────────────────────────────────
+
   return (
     <div className="p-6 bg-black text-white">
       <div className="flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center mb-6">
         <h1 className="text-3xl font-bold">Trading Strategies</h1>
-        <button
-          onClick={() => setShowNewForm(!showNewForm)}
-          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded font-semibold"
-        >
-          + New Strategy
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={() => setShowGenerateForm(!showGenerateForm)}
+            className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded font-semibold"
+          >
+            {hermesGenerating ? 'Generating...' : 'Generate with Hermes'}
+          </button>
+          <button
+            onClick={hermesAutoGenerate}
+            disabled={hermesAutoGenerating}
+            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-700 rounded font-semibold"
+          >
+            {hermesAutoGenerating ? 'Auto-Generating...' : 'Auto-Generate'}
+          </button>
+          <button
+            onClick={() => setShowNewForm(!showNewForm)}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded font-semibold"
+          >
+            + New Strategy
+          </button>
+        </div>
       </div>
 
+      {/* Hermes Status Banner */}
+      {hermesStatus && (
+        <div className={`mb-4 p-3 rounded text-sm ${hermesStatus.hermes_available ? 'bg-green-900/50 text-green-400' : 'bg-yellow-900/50 text-yellow-400'}`}>
+          Hermes: {hermesStatus.hermes_available ? 'Connected' : 'Offline (fallback mode)'}
+          {hermesStatus.hermes_enabled && ' | Strategy generation: enabled'}
+        </div>
+      )}
+
+      {/* Generate with Hermes Form */}
+      {showGenerateForm ? (
+        <div className="mb-8 bg-purple-900/30 border border-purple-700 rounded-lg p-4">
+          <h3 className="text-lg font-semibold mb-4 text-purple-400">Generate Strategy with Hermes AI</h3>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm text-gray-300 mb-2">Symbol</label>
+              <input
+                value={generateSymbol}
+                onChange={(e) => setGenerateSymbol(e.target.value.toUpperCase())}
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white"
+                placeholder="INFY"
+              />
+            </div>
+            <div>
+              <label className="block text-sm text-gray-300 mb-2">Timeframe</label>
+              <select
+                value={generateTimeframe}
+                onChange={(e) => setGenerateTimeframe(e.target.value)}
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white"
+              >
+                <option value="1h">1h</option>
+                <option value="4h">4h</option>
+                <option value="1d">1d</option>
+              </select>
+            </div>
+          </div>
+          {hermesGenerateError && <div className="text-red-400 text-sm mt-2">{hermesGenerateError}</div>}
+          {hermesGenerateResult && (
+            <div className="mt-4 bg-gray-900 rounded p-3">
+              <p className="text-green-400 text-sm mb-2">Strategy generated successfully!</p>
+              <p className="text-sm text-gray-300">{hermesGenerateResult.explanation}</p>
+              <p className="text-xs text-gray-500 mt-1">Confidence: {(hermesGenerateResult.confidence * 100).toFixed(0)}% | Source: {hermesGenerateResult.source}</p>
+            </div>
+          )}
+          <div className="mt-4 flex items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => { setShowGenerateForm(false); setHermesGenerateError(null); setHermesGenerateResult(null); }}
+              className="px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded font-semibold"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={hermesGenerate}
+              disabled={hermesGenerating || !generateSymbol.trim()}
+              className="px-4 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-700 rounded font-semibold"
+            >
+              {hermesGenerating ? 'Generating...' : 'Generate'}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {/* New Strategy Form */}
       {showNewForm ? (
         <form onSubmit={handleCreate} className="mb-8 bg-gray-900 border border-gray-800 rounded-lg p-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -316,6 +530,76 @@ export function StrategiesPage() {
                 <Line type="monotone" dataKey="value" stroke="#3b82f6" dot={false} />
               </LineChart>
             </ResponsiveContainer>
+          </div>
+
+          {/* Hermes Actions */}
+          <div className="bg-gray-900 p-4 rounded mb-6">
+            <h3 className="text-lg font-semibold mb-4">Hermes AI Actions</h3>
+            <div className="flex flex-wrap gap-3 mb-4">
+              <button
+                onClick={() => hermesValidate(selected.id)}
+                disabled={hermesValidating}
+                className="px-3 py-2 bg-green-600 hover:bg-green-700 disabled:bg-gray-700 rounded text-sm font-semibold"
+              >
+                {hermesValidating ? 'Validating...' : 'Validate Strategy'}
+              </button>
+              <button
+                onClick={() => hermesTune(selected.id)}
+                disabled={hermesTuning}
+                className="px-3 py-2 bg-orange-600 hover:bg-orange-700 disabled:bg-gray-700 rounded text-sm font-semibold"
+              >
+                {hermesTuning ? 'Tuning...' : 'Suggest Improvement'}
+              </button>
+              <button
+                onClick={() => hermesExplain(selected.id)}
+                disabled={hermesExplaining}
+                className="px-3 py-2 bg-cyan-600 hover:bg-cyan-700 disabled:bg-gray-700 rounded text-sm font-semibold"
+              >
+                {hermesExplaining ? 'Explaining...' : 'Explain Strategy'}
+              </button>
+            </div>
+
+            {/* Validation Result */}
+            {hermesValidation && (
+              <div className="bg-gray-800 rounded p-3 mb-3">
+                <div className="flex items-center gap-3 mb-2">
+                  <span className={`px-2 py-1 rounded text-sm font-semibold ${
+                    hermesValidation.verdict === 'APPROVED' ? 'bg-green-900 text-green-400' :
+                    hermesValidation.verdict === 'REJECTED' ? 'bg-red-900 text-red-400' :
+                    'bg-yellow-900 text-yellow-400'
+                  }`}>
+                    {hermesValidation.verdict}
+                  </span>
+                  <span className="text-gray-400">Score: {hermesValidation.score}/100</span>
+                </div>
+                <p className="text-sm text-gray-300">{hermesValidation.reasoning}</p>
+                {hermesValidation.suggestions.length > 0 && (
+                  <ul className="mt-2 text-xs text-gray-400 list-disc list-inside">
+                    {hermesValidation.suggestions.map((s, i) => <li key={i}>{s}</li>)}
+                  </ul>
+                )}
+              </div>
+            )}
+
+            {/* Tuning Suggestion */}
+            {hermesSuggestion && (
+              <div className="bg-gray-800 rounded p-3 mb-3">
+                <p className="text-sm font-semibold text-orange-400 mb-1">Suggested Change</p>
+                <p className="text-sm text-gray-300">
+                  Change <code className="bg-gray-700 px-1 rounded">{hermesSuggestion.param}</code> to{' '}
+                  <code className="bg-gray-700 px-1 rounded">{String(hermesSuggestion.value)}</code>
+                </p>
+                <p className="text-xs text-gray-400 mt-1">{hermesSuggestion.reasoning}</p>
+              </div>
+            )}
+
+            {/* Explanation */}
+            {hermesExplanation && (
+              <div className="bg-gray-800 rounded p-3">
+                <p className="text-sm font-semibold text-cyan-400 mb-1">Strategy Explanation</p>
+                <p className="text-sm text-gray-300">{hermesExplanation}</p>
+              </div>
+            )}
           </div>
 
           <div className="bg-gray-900 p-4 rounded">
