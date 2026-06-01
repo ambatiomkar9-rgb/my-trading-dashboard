@@ -57,17 +57,26 @@ export function OverviewPage() {
   const refresh = async () => {
     setLoading(true);
     try {
-      const [wRes, sRes, pRes, hRes] = await Promise.all([
-        fetch(`${API_URL}/api/watchlist`),
-        fetch(`${API_URL}/api/signals/pending`),
-        fetch(`${API_URL}/api/portfolio`),
-        fetch(`${API_URL}/api/system/health`),
+      const safeFetch = async (url: string) => {
+        try {
+          const res = await fetch(url);
+          return await safeJson(res);
+        } catch {
+          return {};
+        }
+      };
+      const [w, s, p, h] = await Promise.all([
+        safeFetch(`${API_URL}/api/watchlist`),
+        safeFetch(`${API_URL}/api/signals/pending`),
+        safeFetch(`${API_URL}/api/portfolio`),
+        safeFetch(`${API_URL}/api/system/health`),
       ]);
-      const [w, s, p, h] = await Promise.all([safeJson(wRes), safeJson(sRes), safeJson(pRes), safeJson(hRes)]);
       setWatchlist(Array.isArray(w) ? w : []);
       setSignals(Array.isArray(s) ? s : []);
       setPortfolio(p && typeof p === 'object' ? (p as Portfolio) : null);
       setHealth(h && typeof h === 'object' ? (h as SystemHealth) : null);
+    } catch {
+      // keep existing state on error
     } finally {
       setLoading(false);
     }
