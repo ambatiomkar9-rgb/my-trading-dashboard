@@ -48,6 +48,8 @@ from backend.notifications.telegram_bot import TelegramCallbackPoller, send_appr
 from backend.portfolio.position_manager import PositionManager
 from backend.risk.risk_guardian import RiskGuardian
 from backend.runtime.system_runtime import TradingSystemRuntime, build_runtime
+from backend.runtime.service_supervisor import ServiceSupervisor
+from backend.runtime.execution_recovery import ExecutionRecoveryManager
 from backend.user_store import create_user, ensure_default_admin, update_password, verify_user
 
 logger = logging.getLogger(__name__)
@@ -858,11 +860,63 @@ async def lifespan(app: FastAPI):
     app.state.shutdown_event = asyncio.Event()
     app.state.background_tasks = []
 
+    # Initialize execution recovery and service supervisor
+    execution_recovery = ExecutionRecoveryManager()
+    supervisor = ServiceSupervisor()
+    app.state.execution_recovery = execution_recovery
+    app.state.supervisor = supervisor
+
     try:
+        # Recover open executions from previous run
+        open_executions = execution_recovery.load_open_executions()
+        if open_executions:
+            logger.info("Recovered %d open executions from previous run", len(open_executions))
+
+        # Start the runtime (agents)
         await runtime.start()
+
+        # Register agents with the supervisor for health monitoring
+        if hasattr(runtime, 'trade_agent') and runtime.trade_agent:
+            supervisor.register(
+                "trade_execution",
+                start_fn=runtime.trade_agent.start,
+                stop_fn=runtime.trade_agent.stop,
+                health_check=lambda: asyncio.sleep(0) or True,
+                health_interval=30.0,
+                required=True,
+            )
+        if runtime.technical_agent and hasattr(runtime.technical_agent, 'start'):
+            supervisor.register(
+                "technical_analysis",
+                start_fn=runtime.technical_agent.start,
+                stop_fn=runtime.technical_agent.stop,
+                health_check=lambda: asyncio.sleep(0) or (runtime.technical_agent is not None),
+                health_interval=60.0,
+                required=False,
+            )
+        if runtime.news_agent and hasattr(runtime.news_agent, 'start'):
+            supervisor.register(
+                "news_sentiment",
+                start_fn=runtime.news_agent.start,
+                stop_fn=runtime.news_agent.stop,
+                health_check=lambda: asyncio.sleep(0) or (runtime.news_agent is not None),
+                health_interval=120.0,
+                required=False,
+            )
+        if runtime.market_data and hasattr(runtime.market_data, 'start'):
+            supervisor.register(
+                "market_data",
+                start_fn=runtime.market_data.start,
+                stop_fn=runtime.market_data.stop,
+                health_check=lambda: asyncio.sleep(0) or (runtime.market_data is not None),
+                health_interval=30.0,
+                required=False,
+            )
+
+        # Start background tasks
         app.state.background_tasks.append(asyncio.create_task(_agent_broadcast_loop(app)))
         app.state.background_tasks.append(asyncio.create_task(_refresh_symbol_master_task(app)))
-        logger.info("Dashboard runtime started")
+        logger.info("Dashboard runtime started with ServiceSupervisor")
     except Exception as exc:  # noqa: BLE001
         logger.error("Runtime startup failed: %s", exc)
 
@@ -968,6 +1022,17 @@ async def system_health(request: Request) -> dict[str, Any]:
 async def runtime_status(request: Request) -> dict[str, Any]:
     """Expose the runtime snapshot for debugging and the agent monitor UI."""
     return _runtime(request).status()
+
+
+@app.get("/api/supervisor/status")
+async def supervisor_status(request: Request) -> dict[str, Any]:
+    """Return ServiceSupervisor agent health and execution recovery stats."""
+    supervisor = getattr(request.app.state, "supervisor", None)
+    execution_recovery = getattr(request.app.state, "execution_recovery", None)
+    return {
+        "agents": supervisor.status() if supervisor else {},
+        "execution_recovery": execution_recovery.get_stats() if execution_recovery else {},
+    }
 
 
 @app.websocket("/ws/agent-monitor")
