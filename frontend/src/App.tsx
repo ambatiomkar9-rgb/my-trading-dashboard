@@ -187,7 +187,7 @@ function LoginPage() {
             {loading ? 'Logging in...' : 'Login'}
           </button>
         </form>
-        <p className="text-xs text-gray-600 mt-4 text-center">Default: admin / admin</p>
+        <p className="text-xs text-gray-600 mt-4 text-center">Default: admin / change-me-now</p>
       </div>
     </div>
   );
