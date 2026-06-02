@@ -337,6 +337,7 @@ class TelegramController:
         self._chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
         self._offset = 0
         self._running = False
+        self._starting = False
         self._state = SystemState()
         self._base = f"https://api.telegram.org/bot{self._token}" if self._token else ""
 
@@ -404,41 +405,56 @@ class TelegramController:
     # ── System Commands ─────────────────────────────────────────────────
 
     async def handle_start_system(self, cb_id: str) -> None:
-        await self._answer_cb(cb_id, "Starting system...")
-        await self._send("⏳ *Starting system...*\n\n1️⃣ Checking Ollama...")
-
-        ok, pid, msg = await start_ollama()
-        if pid:
-            self._state.ollama_pid = pid
-            self._state.ollama_running = True
-            self._state.save()
-
-        if not ok:
-            await self._send(f"❌ Ollama: {msg}\n\nCannot continue without Ollama.")
+        if self._starting:
+            await self._answer_cb(cb_id, "Already starting...")
+            await self._send("⏳ System is already starting, please wait...")
             return
-        await self._send(f"✅ Ollama: {msg}\n\n2️⃣ Starting dashboard...")
+        if self._state.main_running and await is_dashboard_running():
+            await self._answer_cb(cb_id, "Already running")
+            await self._send("✅ System is already running.\n\nUse /status to check.")
+            return
+        self._starting = True
+        try:
+            await self._answer_cb(cb_id, "Starting system...")
+            await self._send("⏳ *Starting system...*\n\n1️⃣ Checking Ollama...")
 
-        ok, pid, msg = await start_dashboard()
-        if pid:
-            self._state.main_pid = pid
-            self._state.main_running = True
-            self._state.started_at = time.strftime("%Y-%m-%d %H:%M:%S")
-            self._state.save()
+            ok, pid, msg = await start_ollama()
+            if pid:
+                self._state.ollama_pid = pid
+                self._state.ollama_running = True
+                self._state.save()
 
-        if ok:
-            status = await get_system_status()
-            agents_online = status.get("agents", {}).get("agents_online", 0)
-            mode = status.get("agents", {}).get("runtime_mode", "paper")
-            await self._send(
-                f"✅ *System Started!*\n\n"
-                f"🖥️ Dashboard: {DASHBOARD_HOST}\n"
-                f"🤖 Agents online: {agents_online}\n"
-                f"📊 Trading mode: {mode}\n"
-                f"🧠 Ollama: {DEFAULT_MODEL}\n\n"
-                f"_Trade signals will appear here with Approve/Reject buttons._"
-            )
-        else:
-            await self._send(f"❌ Dashboard: {msg}")
+            if not ok:
+                await self._send(f"❌ Ollama: {msg}\n\nCannot continue without Ollama.")
+                return
+            await self._send(f"✅ Ollama: {msg}\n\n2️⃣ Starting dashboard...")
+
+            ok, pid, msg = await start_dashboard()
+            if pid:
+                self._state.main_pid = pid
+                self._state.main_running = True
+                self._state.started_at = time.strftime("%Y-%m-%d %H:%M:%S")
+                self._state.save()
+
+            if ok:
+                status = await get_system_status()
+                agents_online = status.get("agents", {}).get("agents_online", 0)
+                mode = status.get("agents", {}).get("runtime_mode", "paper")
+                await self._send(
+                    f"✅ *System Started!*\n\n"
+                    f"🖥️ Dashboard: {DASHBOARD_HOST}\n"
+                    f"🤖 Agents online: {agents_online}\n"
+                    f"📊 Trading mode: {mode}\n"
+                    f"🧠 Ollama: {DEFAULT_MODEL}\n\n"
+                    f"_Trade signals will appear here with Approve/Reject buttons._"
+                )
+            else:
+                await self._send(f"❌ Dashboard: {msg}")
+        except Exception as exc:
+            logger.error("handle_start_system failed: %s", exc, exc_info=True)
+            await self._send(f"❌ Start failed: {exc}")
+        finally:
+            self._starting = False
 
     async def handle_stop_system(self, cb_id: str) -> None:
         await self._answer_cb(cb_id, "Stopping system...")
@@ -535,6 +551,26 @@ class TelegramController:
 
     # ── Polling Loop ────────────────────────────────────────────────────
 
+    async def _drain_old_updates(self) -> None:
+        """Discard all pending updates so stale callbacks don't re-trigger."""
+        if not self._base:
+            return
+        try:
+            async with httpx.AsyncClient(timeout=5, trust_env=False) as client:
+                resp = await client.get(
+                    f"{self._base}/getUpdates",
+                    params={"offset": -1, "limit": 100},
+                )
+                data = resp.json()
+                updates = data.get("result", [])
+                if updates:
+                    self._offset = int(updates[-1].get("update_id", 0)) + 1
+                    logger.info("Drained %d old updates, new offset=%d", len(updates), self._offset)
+                else:
+                    logger.info("No old updates to drain")
+        except Exception as exc:
+            logger.warning("Failed to drain old updates: %s", exc)
+
     async def _poll(self) -> None:
         if not self._base:
             return
@@ -549,6 +585,8 @@ class TelegramController:
                 if not payload.get("ok"):
                     return
                 updates = payload.get("result", [])
+            if updates:
+                logger.info("Received %d update(s), offset=%d", len(updates), self._offset)
 
             for update in updates:
                 self._offset = int(update.get("update_id", self._offset)) + 1
@@ -568,6 +606,7 @@ class TelegramController:
         data = str(cb.get("data") or "")
         cb_id = str(cb.get("id") or "")
         user = cb.get("from", {}).get("first_name", "User")
+        logger.info("Callback received: data=%s cb_id=%s user=%s", data, cb_id, user)
 
         handlers = {
             "ctrl_start": lambda: self.handle_start_system(cb_id),
@@ -576,10 +615,23 @@ class TelegramController:
             "ctrl_models": lambda: self.handle_models(cb_id),
             "ctrl_menu": lambda: self._refresh_menu(cb_id),
         }
-        if data in handlers:
-            await handlers[data]()
-        elif data.startswith("approve_") or data.startswith("reject_"):
-            await self.handle_signal_callback(data, cb_id, user)
+        try:
+            if data in handlers:
+                coro = handlers[data]()
+                if data in ("ctrl_start", "ctrl_stop"):
+                    asyncio.create_task(coro)
+                else:
+                    await coro
+            elif data.startswith("approve_") or data.startswith("reject_"):
+                await self.handle_signal_callback(data, cb_id, user)
+            else:
+                logger.warning("Unknown callback data: %s", data)
+        except Exception as exc:
+            logger.error("Callback handler error for %s: %s", data, exc, exc_info=True)
+            try:
+                await self._send(f"❌ Error handling {data}: {exc}")
+            except Exception:
+                pass
 
     async def _refresh_menu(self, cb_id: str) -> None:
         await self._answer_cb(cb_id, "Menu refreshed")
@@ -629,7 +681,10 @@ class TelegramController:
             return
 
         self._running = True
+        self._starting = False
         logger.info("Telegram controller started (chat_id=%s)", self._chat_id)
+
+        await self._drain_old_updates()
         await self._send("🤖 *Controller online*\n\n_Send /start for menu._")
 
         if self._state.main_running and not await is_dashboard_running():
