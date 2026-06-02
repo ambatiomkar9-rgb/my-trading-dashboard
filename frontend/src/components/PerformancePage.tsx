@@ -8,6 +8,7 @@ interface Trade {
   side: string;
   qty: number;
   price: number;
+  pnl?: number;
   status: string;
   timestamp: string;
 }
@@ -73,9 +74,7 @@ export function PerformancePage() {
     const sorted = [...tradeList].sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
 
     for (const trade of sorted) {
-      const pnl = trade.side === 'buy'
-        ? trade.price * trade.qty * 0.02  // Simulated 2% gain for buys
-        : -trade.price * trade.qty * 0.02; // Simulated 2% loss for sells
+      const pnl = trade.pnl != null ? Number(trade.pnl) : 0;
 
       cumulative += pnl;
       totalPnl += pnl;

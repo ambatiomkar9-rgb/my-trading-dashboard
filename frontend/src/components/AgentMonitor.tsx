@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 
 interface AgentState {
   agent_id: string;
@@ -10,28 +10,53 @@ interface AgentState {
 export function AgentMonitor() {
   const [agents, setAgents] = useState<Record<string, AgentState>>({});
   const [wsError, setWsError] = useState(false);
+  const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const maxReconnect = 10;
 
   useEffect(() => {
     let ws: WebSocket | null = null;
-    try {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      ws = new WebSocket(`${protocol}//${window.location.host}/ws/agent-monitor`);
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.agent_id) {
-            setAgents((prev) => ({ ...prev, [data.agent_id]: data }));
+    let reconnectCount = 0;
+
+    function connect() {
+      try {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        ws = new WebSocket(`${protocol}//${window.location.host}/ws/agent-monitor`);
+        ws.onopen = () => {
+          setWsError(false);
+          reconnectCount = 0;
+        };
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.agent_id) {
+              setAgents((prev) => ({ ...prev, [data.agent_id]: data }));
+            }
+          } catch {
+            // ignore non-JSON messages
           }
-        } catch {
-          // ignore non-JSON messages
+        };
+        ws.onerror = () => setWsError(true);
+        ws.onclose = () => {
+          setWsError(true);
+          if (reconnectCount < maxReconnect) {
+            reconnectCount++;
+            reconnectRef.current = setTimeout(connect, Math.min(1000 * Math.pow(2, reconnectCount), 30000));
+          }
+        };
+      } catch {
+        setWsError(true);
+        if (reconnectCount < maxReconnect) {
+          reconnectCount++;
+          reconnectRef.current = setTimeout(connect, Math.min(1000 * Math.pow(2, reconnectCount), 30000));
         }
-      };
-      ws.onerror = () => setWsError(true);
-      ws.onclose = () => setWsError(true);
-    } catch {
-      setWsError(true);
+      }
     }
-    return () => { if (ws) ws.close(); };
+
+    connect();
+    return () => {
+      if (ws) ws.close();
+      if (reconnectRef.current) clearTimeout(reconnectRef.current);
+    };
   }, []);
 
   return (

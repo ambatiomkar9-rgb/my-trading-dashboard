@@ -70,7 +70,7 @@ def parse_rule(rule_json: str) -> Optional[StrategyRule]:
     return StrategyRule(conditions=conditions, logic=logic) if conditions else None
 
 
-def evaluate_condition(condition: StrategyCondition, indicators: dict[str, float]) -> bool:
+def evaluate_condition(condition: StrategyCondition, indicators: dict[str, float], prev_indicators: Optional[dict[str, float]] = None) -> bool:
     """Evaluate a single condition against computed indicators."""
     ind_val = indicators.get(condition.indicator, 0.0)
     compare_val = condition.value
@@ -90,19 +90,29 @@ def evaluate_condition(condition: StrategyCondition, indicators: dict[str, float
         return ind_val >= compare_val
     if op in ("equals", "eq", "is"):
         if condition.indicator == "trend":
-            return str(condition.compare_to).lower() in str(ind_val).lower()
+            target = str(condition.compare_to).lower()
+            actual = str(ind_val).lower()
+            return target == actual
         return abs(ind_val - compare_val) < 0.001
     if op in ("crossover",):
-        # For crossover, we need previous value - use current threshold
-        return ind_val > compare_val
+        if not prev_indicators:
+            return False
+        prev_ind = prev_indicators.get(condition.indicator, ind_val)
+        prev_cmp = prev_indicators.get(condition.compare_to, compare_val) if condition.compare_to else compare_val
+        return prev_ind <= prev_cmp and ind_val > compare_val
     if op in ("crossunder",):
-        return ind_val < compare_val
+        if not prev_indicators:
+            return False
+        prev_ind = prev_indicators.get(condition.indicator, ind_val)
+        prev_cmp = prev_indicators.get(condition.compare_to, compare_val) if condition.compare_to else compare_val
+        return prev_ind >= prev_cmp and ind_val < compare_val
     return False
 
 
 def evaluate_rule(
     rule: StrategyRule,
     indicators: dict[str, float],
+    prev_indicators: Optional[dict[str, float]] = None,
 ) -> dict[str, Any]:
     """
     Evaluate a parsed strategy rule against live indicators.
@@ -122,7 +132,7 @@ def evaluate_rule(
     met_count = 0
 
     for cond in rule.conditions:
-        result = evaluate_condition(cond, indicators)
+        result = evaluate_condition(cond, indicators, prev_indicators)
         details.append({
             "indicator": cond.indicator,
             "operator": cond.operator,
@@ -159,6 +169,7 @@ class StrategyEngine:
     def __init__(self, event_bus: Any) -> None:
         self._bus = event_bus
         self._strategies: dict[str, dict] = {}
+        self._prev_indicators: dict[str, dict[str, float]] = {}
 
     def load_strategies(self, strategies: list[dict]) -> None:
         """Load strategies from DB rows."""
@@ -198,11 +209,14 @@ class StrategyEngine:
             if strat["symbol"] != sym:
                 continue
 
+            prev = self._prev_indicators.get(sym)
+            self._prev_indicators[sym] = dict(indicators)
+
             entry = strat.get("entry_rule")
             exit_rule = strat.get("exit_rule")
 
             if entry:
-                result = evaluate_rule(entry, indicators)
+                result = evaluate_rule(entry, indicators, prev)
                 if result["triggered"]:
                     signal = {
                         "strategy_id": sid,
@@ -219,7 +233,7 @@ class StrategyEngine:
                     logger.info("Strategy %s ENTRY signal for %s", strat["name"], sym)
 
             if exit_rule:
-                result = evaluate_rule(exit_rule, indicators)
+                result = evaluate_rule(exit_rule, indicators, prev)
                 if result["triggered"]:
                     signal = {
                         "strategy_id": sid,

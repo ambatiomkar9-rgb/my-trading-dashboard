@@ -22,7 +22,8 @@ class TokenStore:
         if key_env:
             self._key = key_env.encode("utf-8") if isinstance(key_env, str) else key_env
         elif os.path.exists(KEY_PATH):
-            self._key = open(KEY_PATH, "rb").read().strip()
+            with open(KEY_PATH, "rb") as f:
+                self._key = f.read().strip()
         else:
             self._key = Fernet.generate_key()
             try:

@@ -86,9 +86,9 @@ export function BrokerReconciliation() {
   };
 
   const handleForceSync = async (symbol: string) => {
+    if (!window.confirm(`Force sync ${symbol}? This overwrites local data with broker data.`)) return;
     try {
-      await api.post(`/api/broker/sync/${symbol}`);
-      // Refresh after sync
+      await api.post(`/api/broker/sync/${encodeURIComponent(symbol)}`);
       await fetchAccount();
     } catch (err) {
       console.error('Force sync failed:', err);

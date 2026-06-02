@@ -52,7 +52,12 @@ class AsyncEventBus:
 
             if self._event_store is not None:
                 try:
-                    self._event_store.store_event(name, payload if isinstance(payload, dict) else {"value": payload}, source=source)
+                    await asyncio.to_thread(
+                        self._event_store.store_event,
+                        name,
+                        payload if isinstance(payload, dict) else {"value": payload},
+                        source=source,
+                    )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Failed to persist event %s: %s", name, exc)
 

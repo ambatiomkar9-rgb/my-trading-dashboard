@@ -1,5 +1,31 @@
-import React, { useState } from 'react';
+import React, { Component, useState } from 'react';
 import { AuthProvider, useAuth } from './auth/AuthContext';
+
+class ErrorBoundary extends Component<{children: React.ReactNode}, {hasError: boolean; error: string}> {
+  constructor(props: {children: React.ReactNode}) {
+    super(props);
+    this.state = { hasError: false, error: '' };
+  }
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error: error.message };
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex items-center justify-center h-screen bg-black text-white">
+          <div className="text-center p-8 bg-gray-950 border border-red-800 rounded-lg max-w-md">
+            <h2 className="text-xl font-bold text-red-400 mb-2">Something went wrong</h2>
+            <p className="text-gray-400 text-sm mb-4">{this.state.error}</p>
+            <button onClick={() => window.location.reload()} className="px-4 py-2 bg-blue-600 rounded hover:bg-blue-700">
+              Reload Page
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 import { OverviewPage } from './components/OverviewPage';
 import { TradingPage } from './components/TradingPage';
 import { StrategiesPage } from './components/StrategiesPage';
@@ -96,10 +122,7 @@ function DashboardContent() {
               'backtesting',
               'screener',
               'performance',
-              'live-status',
-              'broker-recon',
               'settings',
-              'animation',
             ] as Page[]
           ).map((p) => (
             <button
@@ -191,7 +214,7 @@ function LoginPage() {
             {loading ? 'Logging in...' : 'Login'}
           </button>
         </form>
-        <p className="text-xs text-gray-600 mt-4 text-center">Default: admin / change-me-now</p>
+        <p className="text-xs text-gray-600 mt-4 text-center">Contact admin for credentials</p>
       </div>
     </div>
   );
@@ -199,9 +222,11 @@ function LoginPage() {
 
 function AppWrapper() {
   return (
-    <AuthProvider>
-      <DashboardContent />
-    </AuthProvider>
+    <ErrorBoundary>
+      <AuthProvider>
+        <DashboardContent />
+      </AuthProvider>
+    </ErrorBoundary>
   );
 }
 

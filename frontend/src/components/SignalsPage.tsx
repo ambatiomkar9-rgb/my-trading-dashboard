@@ -42,7 +42,7 @@ export function SignalsPage() {
       await api.post('/api/signal/approve', { signal_id: id });
       await refresh();
     } catch (error: any) {
-      alert(error?.message || 'Failed to approve signal');
+      console.error('Approve failed:', error?.message || error);
     } finally {
       setApproving(null);
     }
@@ -54,7 +54,7 @@ export function SignalsPage() {
       await api.post('/api/signal/skip', { signal_id: id, reason: 'Skipped from dashboard' });
       await refresh();
     } catch (error: any) {
-      alert(error?.message || 'Failed to skip signal');
+      console.error('Skip failed:', error?.message || error);
     } finally {
       setSkipping(null);
     }

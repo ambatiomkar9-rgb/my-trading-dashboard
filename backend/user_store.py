@@ -129,8 +129,11 @@ def ensure_default_admin() -> None:
             admin_pw = os.getenv("ADMIN_PASSWORD", "change-me-now")
             session.close()
             if create_user("admin", admin_pw, "admin"):
-                logger.warning("Default admin created (password: %s). Set ADMIN_PASSWORD to change.", admin_pw)
+                logger.warning("Default admin created. Set ADMIN_PASSWORD env var to change it.")
     except Exception as exc:
         logger.error("ensure_default_admin failed: %s", exc)
     finally:
-        session.close()
+        try:
+            session.close()
+        except Exception:
+            pass

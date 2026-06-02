@@ -70,7 +70,7 @@ class SymbolMasterService:
         from backend.database import engine
         from sqlalchemy import text
 
-        with engine.connect() as conn:
+        with engine.begin() as conn:
             conn.execute(text("DELETE FROM instrument_master"))
 
             rows = []
@@ -103,8 +103,6 @@ class SymbolMasterService:
                     """),
                     chunk,
                 )
-
-            conn.commit()
 
         return {"ok": True, "count": len(instruments)}
 

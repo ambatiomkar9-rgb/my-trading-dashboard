@@ -203,7 +203,7 @@ def validate_pinescript(script: str) -> PineScriptValidation:
     warnings: list[str] = []
 
     if not script or not script.strip():
-        return PineScriptValidaton(valid=False, errors=["Empty script"])
+        return PineScriptValidation(valid=False, errors=["Empty script"])
 
     lines = script.strip().split('\n')
 
@@ -236,12 +236,6 @@ def validate_pinescript(script: str) -> PineScriptValidation:
         # Check for common mistakes
         if 'close(' in stripped:
             warnings.append(f"Line {i}: 'close' is a variable, not a function. Use 'close' without parentheses.")
-        if 'open(' in stripped and 'open(' not in stripped:
-            warnings.append(f"Line {i}: 'open' is a variable, not a function.")
-        if 'high(' in stripped and 'high(' not in stripped:
-            warnings.append(f"Line {i}: 'high' is a variable, not a function.")
-        if 'low(' in stripped and 'low(' not in stripped:
-            warnings.append(f"Line {i}: 'low' is a variable, not a function.")
 
     # Check for missing semicolons (PineScript doesn't use them, but common mistake)
     # Check for using = instead of := for reassignment

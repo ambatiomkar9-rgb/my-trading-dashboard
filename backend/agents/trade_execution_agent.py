@@ -56,6 +56,7 @@ class TradeExecutionAgent:
         self.bus = event_bus
         self._running = False
         self._placed: dict[str, str] = {}
+        self._monitored: set[str] = set()
         self._init_db()
         self._load_existing_orders()
 
@@ -92,7 +93,7 @@ class TradeExecutionAgent:
             with engine.connect() as conn:
                 result = conn.execute(text(
                     "SELECT client_order_id, broker_order_id FROM executions "
-                    "WHERE broker_order_id IS NOT NULL AND broker_order_id != ''"
+                    "WHERE status IN ('submitted', 'filled', 'partially_filled')"
                 ))
                 rows = result.fetchall()
             self._placed = {str(row[0]): str(row[1]) for row in rows}
@@ -295,9 +296,9 @@ class TradeExecutionAgent:
                             validity=str(signal.get("validity") or "DAY"),
                         )
                     break
-                except TypeError:
-                    result = await broker.place_order(symbol=symbol, side=side, quantity=quantity, order_type="MARKET")
-                    break
+                except TypeError as exc:
+                    logger.error("Broker place_order TypeError (wrong signature): %s", exc)
+                    raise
                 except Exception as exc:  # noqa: BLE001
                     last_exc = exc
                     wait = min(2 ** attempt * 2, 30)
@@ -355,6 +356,9 @@ class TradeExecutionAgent:
         quantity: int,
     ) -> None:
         """Poll order status until the broker reports a final state."""
+        if client_oid in self._monitored:
+            return
+        self._monitored.add(client_oid)
         try:
             deadline = time.time() + 120
             broker = self._resolve_broker(broker_name)

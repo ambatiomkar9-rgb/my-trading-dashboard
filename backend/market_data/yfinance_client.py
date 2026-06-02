@@ -227,12 +227,12 @@ def compute_technical_indicators(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     df["macd"] = df["ema_fast"] - df["ema_slow"]
     df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
 
-    # RSI (14-period)
+    # RSI (14-period, Wilder's smoothing)
     delta = df["close"].diff()
     gain = delta.where(delta > 0, 0.0)
     loss = (-delta).where(delta < 0, 0.0)
-    avg_gain = gain.rolling(window=14).mean()
-    avg_loss = loss.rolling(window=14).mean()
+    avg_gain = gain.ewm(alpha=1.0/14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1.0/14, min_periods=14, adjust=False).mean()
     rs = avg_gain / (avg_loss + 1e-10)
     df["rsi"] = 100 - (100 / (1 + rs))
 

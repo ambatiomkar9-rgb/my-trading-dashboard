@@ -50,9 +50,11 @@ MAIN_PY = BACKEND_DIR / "main.py"
 STATE_FILE = BACKEND_DIR / "controller_state.json"
 
 OLLAMA_PATHS = [
-    Path(r"C:\Users\ambat\AppData\Local\Programs\Ollama\ollama.exe"),
+    Path(os.getenv("OLLAMA_PATH", "")),
     Path(r"C:\Program Files\Ollama\ollama.exe"),
     Path.home() / "AppData" / "Local" / "Programs" / "Ollama" / "ollama.exe",
+    Path(r"/usr/local/bin/ollama"),
+    Path(r"/usr/bin/ollama"),
 ]
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
@@ -135,10 +137,13 @@ async def start_ollama() -> tuple[bool, Optional[int], str]:
 
     try:
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        log_dir = REPO_ROOT / "logs"
+        log_dir.mkdir(exist_ok=True)
+        ollama_log = open(log_dir / "ollama.log", "a")
         proc = subprocess.Popen(
             [ollama_bin, "serve"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=ollama_log,
+            stderr=ollama_log,
             creationflags=flags,
         )
         logger.info("Ollama started with PID %d", proc.pid)
@@ -234,11 +239,14 @@ async def start_dashboard() -> tuple[bool, Optional[int], str]:
         env["TELEGRAM_DISABLED"] = "true"
         env["DASHBOARD_URL"] = DASHBOARD_HOST
 
+        log_dir = REPO_ROOT / "logs"
+        log_dir.mkdir(exist_ok=True)
+        dashboard_log = open(log_dir / "dashboard.log", "a")
         proc = subprocess.Popen(
             [sys.executable, str(MAIN_PY)],
             cwd=str(REPO_ROOT),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=dashboard_log,
+            stderr=dashboard_log,
             creationflags=flags,
             env=env,
         )

@@ -1035,6 +1035,7 @@ async def lifespan(app: FastAPI):
     app.state.runtime = runtime
     app.state.tooling = tooling
     app.state.chat_commands = {}
+    app.state.chat_commands_max = 200
     app.state.ws_manager = AgentConnectionManager()
     app.state.shutdown_event = asyncio.Event()
     app.state.background_tasks = []
@@ -2484,7 +2485,13 @@ async def chat(payload: ChatRequest, request: Request) -> dict[str, Any]:
     if not message:
         raise HTTPException(status_code=400, detail="Message is required")
     command_id = uuid.uuid4().hex
-    request.app.state.chat_commands[command_id] = {"status": "running", "response": None}
+    cmds = request.app.state.chat_commands
+    max_size = getattr(request.app.state, "chat_commands_max", 200)
+    if len(cmds) > max_size:
+        oldest_keys = list(cmds.keys())[:max_size // 2]
+        for k in oldest_keys:
+            cmds.pop(k, None)
+    cmds[command_id] = {"status": "running", "response": None}
     session = SessionLocal()
     try:
         session.add(ChatHistory(user_id="user", role="user", message=message, timestamp=_utc_now()))

@@ -194,7 +194,8 @@ class ExecutionRecoveryManager:
             ).first()
             return row is not None
         except Exception:
-            return False
+            logger.error("is_duplicate DB check failed for %s — assuming duplicate (fail-closed)", client_order_id)
+            return True
         finally:
             session.close()
 

@@ -47,9 +47,10 @@ export function LiveStatusPanel() {
 
   const fetchStatus = useCallback(async () => {
     try {
-      const [sysRes, portRes] = await Promise.allSettled([
+      const [sysRes, portRes, ordersRes] = await Promise.allSettled([
         api.get('/api/system/status'),
         api.get('/api/portfolio'),
+        api.get('/api/executions?limit=10'),
       ]);
 
       if (sysRes.status === 'fulfilled') {
@@ -58,12 +59,39 @@ export function LiveStatusPanel() {
 
       if (portRes.status === 'fulfilled') {
         const data = portRes.value;
+        const positions = data.positions || [];
+        const priceMap = new Map<string, PriceUpdate>();
+        for (const pos of positions) {
+          if (pos.quantity !== 0) {
+            priceMap.set(pos.symbol, {
+              symbol: pos.symbol,
+              ltp: pos.current_price || pos.avg_entry_price || 0,
+              change: pos.unrealized_pnl || 0,
+              change_pct: pos.avg_entry_price ? ((pos.current_price - pos.avg_entry_price) / pos.avg_entry_price * 100) : 0,
+              timestamp: Date.now(),
+            });
+          }
+        }
+        setPrices(priceMap);
         setPnl({
           realized: data.realized_pnl || 0,
           unrealized: data.unrealized_pnl || 0,
           total: (data.realized_pnl || 0) + (data.unrealized_pnl || 0),
           timestamp: Date.now(),
         });
+      }
+
+      if (ordersRes.status === 'fulfilled') {
+        const execs = Array.isArray(ordersRes.value) ? ordersRes.value : (ordersRes.value.executions || []);
+        setOrders(execs.map((e: any) => ({
+          id: e.client_order_id || e.id,
+          symbol: e.symbol,
+          side: e.side,
+          quantity: e.quantity,
+          price: e.entry_price || 0,
+          status: e.status,
+          timestamp: e.created_at,
+        })));
       }
     } catch (err) {
       console.error('Failed to fetch status:', err);
