@@ -10,6 +10,8 @@ from typing import Any, Optional
 try:
     from backend.agents.news_sentiment_agent import NewsSentimentAgent  # type: ignore
     from backend.agents.trade_execution_agent import TradeExecutionAgent  # type: ignore
+    from backend.agents.macro_intelligence_agent import MacroIntelligenceAgent  # type: ignore
+    from backend.agents.whale_intelligence_agent import WhaleIntelligenceAgent  # type: ignore
     from backend.brokers.paper_broker import PaperBroker, PaperBrokerRouter  # type: ignore
     from backend.execution.auth.broker_auth_manager import BrokerAuthManager  # type: ignore
     from backend.market_data.market_data_engine import MarketDataEngine  # type: ignore
@@ -21,6 +23,8 @@ try:
 except ModuleNotFoundError:  # noqa: BLE001
     from agents.news_sentiment_agent import NewsSentimentAgent  # type: ignore
     from agents.trade_execution_agent import TradeExecutionAgent  # type: ignore
+    from agents.macro_intelligence_agent import MacroIntelligenceAgent  # type: ignore
+    from agents.whale_intelligence_agent import WhaleIntelligenceAgent  # type: ignore
     from brokers.paper_broker import PaperBroker, PaperBrokerRouter  # type: ignore
     from execution.auth.broker_auth_manager import BrokerAuthManager  # type: ignore
     from market_data.market_data_engine import MarketDataEngine  # type: ignore
@@ -62,6 +66,8 @@ class TradingSystemRuntime:
         self.risk_guardian = RiskGuardian(self.charges_engine)
         self.market_data: MarketDataEngine | None = None
         self.news_agent: NewsSentimentAgent | None = None
+        self.macro_agent: MacroIntelligenceAgent | None = None
+        self.whale_agent: WhaleIntelligenceAgent | None = None
         self.telegram_poller: TelegramCallbackPoller | None = None
         self.technical_agent: Any | None = None
         self._tasks: dict[str, asyncio.Task[Any]] = {}
@@ -212,6 +218,8 @@ class TradingSystemRuntime:
             "market_data_enabled": self._market_data_enabled,
             "market_data_online": self.market_data is not None,
             "news_agent_online": self.news_agent is not None,
+            "macro_agent_online": self.macro_agent is not None,
+            "whale_agent_online": self.whale_agent is not None,
             "telegram_online": self.telegram_poller is not None,
             "technical_agent_online": self.technical_agent is not None,
             "tasks": {name: not task.done() for name, task in self._tasks.items()},
@@ -258,6 +266,14 @@ class TradingSystemRuntime:
 
             self._spawn("trade", self.trade_agent.start())
 
+            # Start macro intelligence agent (always runs — provides market-wide context)
+            self.macro_agent = MacroIntelligenceAgent(self.event_bus)
+            self._spawn("macro", self.macro_agent.start())
+
+            # Start whale intelligence agent (always runs — tracks institutional flows)
+            self.whale_agent = WhaleIntelligenceAgent(self.event_bus)
+            self._spawn("whale", self.whale_agent.start())
+
             if os.getenv("TELEGRAM_BOT_TOKEN", "").strip() and os.getenv("DASHBOARD_API_TOKEN", "").strip():
                 self.telegram_poller = TelegramCallbackPoller()
                 self._spawn("telegram", self.telegram_poller.start())
@@ -276,7 +292,7 @@ class TradingSystemRuntime:
         """Stop the agents and cancel background tasks."""
         try:
             self._running = False
-            for agent in (self.telegram_poller, self.news_agent, self.trade_agent, self.market_data, self.technical_agent):
+            for agent in (self.telegram_poller, self.news_agent, self.trade_agent, self.market_data, self.technical_agent, self.macro_agent, self.whale_agent):
                 try:
                     stop = getattr(agent, "stop", None)
                     if stop is not None:

@@ -742,27 +742,6 @@ def _synthetic_backtest(request: BacktestRequest) -> dict[str, Any]:
         "trades": trades,
         "dates": dates,
     }
-        )
-
-    total_trades = len(trades)
-    win_rate = round((wins / total_trades) * 100.0, 2) if total_trades else 0.0
-    gross_profit = sum(t["profit"] for t in trades if t["profit"] > 0)
-    gross_loss = abs(sum(t["profit"] for t in trades if t["profit"] < 0)) or 1.0
-    profit_factor = round(gross_profit / gross_loss, 2)
-    sharpe = round((total_profit / float(request.capital)) * 10.0, 2)
-    max_dd = round(abs(min((point["value"] for point in equity_curve), default=request.capital) - request.capital), 2)
-    net_pnl = round(total_profit, 2)
-    return {
-        "total_trades": total_trades,
-        "win_rate": win_rate,
-        "profit_factor": profit_factor,
-        "sharpe": sharpe,
-        "max_dd": max_dd,
-        "net_pnl": net_pnl,
-        "equity_curve": equity_curve,
-        "trades": trades,
-        "dates": dates,
-    }
 
 
 async def _call_broker_method(broker: Any, method_name: str, *args: Any, **kwargs: Any) -> Any:
@@ -886,6 +865,22 @@ async def _build_agent_cards(app: FastAPI) -> list[dict[str, Any]]:
             "progress": 100 if hermes_enabled else 0,
         }
     )
+
+    macro_online = snapshot.get("macro_agent_online", False)
+    cards.append({
+        "agent_id": "macro_intelligence",
+        "status": "online" if macro_online else "offline",
+        "task": "Analyzing macro indicators (USD/INR, crude, VIX)" if macro_online else "Waiting to start",
+        "progress": 100 if macro_online else 0,
+    })
+
+    whale_online = snapshot.get("whale_agent_online", False)
+    cards.append({
+        "agent_id": "whale_intelligence",
+        "status": "online" if whale_online else "offline",
+        "task": "Tracking institutional block deals" if whale_online else "Waiting to start",
+        "progress": 100 if whale_online else 0,
+    })
 
     for strategy in strategies[:10]:
         status, progress = _strategy_status_label(str(getattr(strategy, "status", "") or "paused"))
@@ -1097,6 +1092,100 @@ async def lifespan(app: FastAPI):
 
     event_bus.subscribe("market.tick", _evaluate_strategies_on_tick)
 
+    # Subscribe to strategy engine signals → create TradeSignal rows in DB
+    async def _on_strategy_signal(payload: dict[str, Any]) -> None:
+        try:
+            symbol = str(payload.get("symbol") or "").upper()
+            side = str(payload.get("side") or "buy").lower()
+            price = float(payload.get("price") or 0.0)
+            strategy_id = str(payload.get("strategy_id") or "")
+            strategy_name = str(payload.get("strategy_name") or "")
+            confidence = float(payload.get("confidence") or 0.0)
+            reason = str(payload.get("reason") or "Strategy rule triggered")
+            if not symbol:
+                return
+            signal_id = uuid.uuid4().hex
+            session = SessionLocal()
+            try:
+                watch = session.query(WatchlistStock).filter(WatchlistStock.symbol == symbol).first()
+                quantity = int(getattr(watch, "quantity_to_buy", 1) or 1) if watch else 1
+                row = TradeSignal(
+                    id=signal_id,
+                    symbol=symbol,
+                    strategy_id=strategy_id or "strategy_engine",
+                    signal_type=side,
+                    signal_price=price,
+                    signal_time=_utc_now(),
+                    technical_score=round(confidence * 100, 1),
+                    news_score=0.0,
+                    fundamental_score=0.0,
+                    risk_score=0.0,
+                    overall_score=round(confidence * 100, 1),
+                    approval_status="pending",
+                    approval_reason=f"[{strategy_name}] {reason}",
+                )
+                session.add(row)
+                session.commit()
+            finally:
+                session.close()
+            signal_payload = {
+                "id": signal_id,
+                "symbol": symbol,
+                "side": side,
+                "signal_type": side,
+                "quantity": quantity,
+                "quantity_to_buy": quantity,
+                "price": price,
+                "signal_price": price,
+                "score": round(confidence * 100, 1),
+                "technical_score": round(confidence * 100, 1),
+                "news_score": 0.0,
+                "fundamental_score": 0.0,
+                "risk_score": 0.0,
+                "overall_score": round(confidence * 100, 1),
+                "reason": reason,
+                "approval_reason": reason,
+                "approval_status": "pending",
+                "broker": "upstox",
+                "trade_segment": "intraday",
+                "expected_exit": round(price * (1.03 if side == "buy" else 0.97), 2),
+            }
+            await send_approval_request(signal_payload)
+            logger.info("Strategy engine signal created: %s %s @ %.2f (confidence=%.2f)", side.upper(), symbol, price, confidence)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Strategy signal handler failed: %s", exc)
+
+    event_bus.subscribe("strategy.entry_signal", _on_strategy_signal)
+    event_bus.subscribe("strategy.exit_signal", _on_strategy_signal)
+
+    # Subscribe to news/whale/macro events → store latest intelligence snapshots
+    _intelligence_cache: dict[str, Any] = {}
+
+    async def _on_news_sentiment(payload: dict[str, Any]) -> None:
+        try:
+            symbol = str(payload.get("symbol") or "").upper()
+            if symbol:
+                _intelligence_cache[f"news_{symbol}"] = payload
+        except Exception:
+            pass
+
+    async def _on_whale_activity(payload: dict[str, Any]) -> None:
+        try:
+            _intelligence_cache["whale"] = payload
+        except Exception:
+            pass
+
+    async def _on_macro_update(payload: dict[str, Any]) -> None:
+        try:
+            _intelligence_cache["macro"] = payload
+        except Exception:
+            pass
+
+    event_bus.subscribe("news.sentiment", _on_news_sentiment)
+    event_bus.subscribe("whale.activity", _on_whale_activity)
+    event_bus.subscribe("macro.update", _on_macro_update)
+    app.state.intelligence_cache = _intelligence_cache
+
     try:
         # Recover open executions from previous run
         open_executions = execution_recovery.load_open_executions()
@@ -1143,6 +1232,27 @@ async def lifespan(app: FastAPI):
                 health_interval=30.0,
                 required=False,
             )
+        if runtime.macro_agent and hasattr(runtime.macro_agent, 'start'):
+            supervisor.register(
+                "macro_intelligence",
+                start_fn=runtime.macro_agent.start,
+                stop_fn=runtime.macro_agent.stop,
+                health_check=lambda: asyncio.sleep(0) or (runtime.macro_agent is not None),
+                health_interval=300.0,
+                required=False,
+            )
+        if runtime.whale_agent and hasattr(runtime.whale_agent, 'start'):
+            supervisor.register(
+                "whale_intelligence",
+                start_fn=runtime.whale_agent.start,
+                stop_fn=runtime.whale_agent.stop,
+                health_check=lambda: asyncio.sleep(0) or (runtime.whale_agent is not None),
+                health_interval=300.0,
+                required=False,
+            )
+
+        # Start the supervisor health monitor loop (agents already started by runtime)
+        await supervisor.start_health_monitor()
 
         # Start background tasks
         app.state.background_tasks.append(asyncio.create_task(_agent_broadcast_loop(app)))
@@ -1180,7 +1290,11 @@ app = FastAPI(title="Trading Dashboard", version="1.0.0", lifespan=lifespan)
 
 _cors_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
 if not _cors_origins:
-    _cors_origins = ["http://127.0.0.1:5173", "http://localhost:5173"]
+    _cors_origins = [
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+        "https://my-trading-dashboard-8.onrender.com",
+    ]
 
 app.add_middleware(
     CORSMiddleware,

@@ -1,8 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
 
-const API_URL = '';
-
 type TradeSignal = {
   id: string;
   symbol: string;
@@ -22,20 +20,10 @@ export function SignalsPage() {
   const [approving, setApproving] = useState<string | null>(null);
   const [skipping, setSkipping] = useState<string | null>(null);
 
-  const safeJson = async (res: Response) => {
-    const text = await res.text();
-    try {
-      return text ? JSON.parse(text) : {};
-    } catch {
-      return { raw: text };
-    }
-  };
-
   const refresh = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${API_URL}/api/signals/pending`);
-      const data = await safeJson(res);
+      const data = await api.get('/api/signals/pending');
       setSignals(Array.isArray(data) ? data : []);
     } finally {
       setLoading(false);
@@ -67,12 +55,6 @@ export function SignalsPage() {
       await refresh();
     } catch (error: any) {
       alert(error?.message || 'Failed to skip signal');
-    } finally {
-      setSkipping(null);
-    }
-  };
-      }
-      await refresh();
     } finally {
       setSkipping(null);
     }

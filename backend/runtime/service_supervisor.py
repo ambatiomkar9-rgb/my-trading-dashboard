@@ -132,6 +132,17 @@ class ServiceSupervisor:
         self._health_task = asyncio.create_task(self._health_monitor_loop())
         logger.info("ServiceSupervisor started all agents")
 
+    async def start_health_monitor(self) -> None:
+        """Start only the health monitor loop (agents already started externally)."""
+        self._running = True
+        # Mark all registered agents as RUNNING since they were started externally
+        for name, agent in self._agents.items():
+            if agent.state == AgentState.STOPPED:
+                agent.state = AgentState.RUNNING
+                agent.last_started_at = time.time()
+        self._health_task = asyncio.create_task(self._health_monitor_loop())
+        logger.info("ServiceSupervisor health monitor started for %d agents", len(self._agents))
+
     async def _start_agent(self, agent: AgentDescriptor) -> None:
         """Start a single agent with restart logic."""
         try:

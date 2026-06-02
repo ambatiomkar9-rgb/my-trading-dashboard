@@ -21,7 +21,7 @@ import sys
 import time
 from typing import Any
 
-import requests
+import httpx
 
 BASE_URL = "http://localhost:8000"
 ADMIN_USER = "admin"
@@ -30,7 +30,7 @@ ADMIN_PASS = "admin"
 
 class SmokeTest:
     def __init__(self) -> None:
-        self.session = requests.Session()
+        self.session = httpx.Client()
         self.jwt: str = ""
         self.symbol: str = "TESTSMOKE"
         self.signal_id: str = ""

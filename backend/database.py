@@ -12,6 +12,7 @@ from sqlalchemy import (
     Boolean,
     Text,
     Index,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.exc import OperationalError
@@ -279,6 +280,7 @@ class Position(Base):
     __table_args__ = (
         Index("ix_positions_symbol", "symbol"),
         Index("ix_positions_broker_symbol", "broker", "symbol"),
+        UniqueConstraint("broker", "symbol", name="uq_positions_broker_symbol"),
     )
 
 
