@@ -6,17 +6,63 @@ On startup, this module:
 3. Marks stale orders as expired
 4. Updates position snapshots
 5. Prevents duplicate order placement
+
+Uses SQLAlchemy (Supabase PostgreSQL) instead of raw SQLite for persistence across redeploys.
 """
 from __future__ import annotations
 
-import json
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any, Optional
 
+from sqlalchemy import Column, Float, Integer, String, Text
+from sqlalchemy.exc import IntegrityError
+
+from backend.database import Base, SessionLocal
+
 logger = logging.getLogger(__name__)
+
+
+class OpenExecutionRow(Base):
+    __tablename__ = "execution_recovery_open"
+
+    execution_id = Column(String(128), primary_key=True)
+    order_id = Column(String(128))
+    symbol = Column(String(32))
+    side = Column(String(16))
+    quantity = Column(Float)
+    broker = Column(String(32))
+    mode = Column(String(16))
+    status = Column(String(64))
+    submitted_at = Column(Float)
+    broker_order_id = Column(String(128), nullable=True)
+    last_checked_at = Column(Float, default=0.0)
+    check_count = Column(Integer, default=0)
+
+
+class FilledExecutionRow(Base):
+    __tablename__ = "execution_recovery_filled"
+
+    execution_id = Column(String(128), primary_key=True)
+    order_id = Column(String(128))
+    symbol = Column(String(32))
+    side = Column(String(16))
+    quantity = Column(Float)
+    fill_price = Column(Float)
+    broker = Column(String(32))
+    mode = Column(String(16))
+    filled_at = Column(Float)
+
+
+class IdempotencyRow(Base):
+    __tablename__ = "execution_recovery_idempotency"
+
+    client_order_id = Column(String(128), primary_key=True)
+    broker = Column(String(32))
+    status = Column(String(64))
+    broker_order_id = Column(String(128))
+    created_at = Column(Float)
 
 
 @dataclass
@@ -37,65 +83,15 @@ class OpenExecution:
 
 
 class ExecutionRecoveryManager:
-    """Manages restart-safe execution state.
+    """Manages restart-safe execution state using SQLAlchemy (Supabase PostgreSQL)."""
 
-    - Persists open executions to a SQLite database
-    - On startup, reloads and reconciles with broker
-    - Provides idempotency checks for duplicate prevention
-    """
-
-    def __init__(self, db_path: str = "data/execution_recovery.db") -> None:
-        self._db_path = db_path
+    def __init__(self) -> None:
         self._open_executions: dict[str, OpenExecution] = {}
-        self._conn: Any = None
-        self._init_db()
+        self._ensure_tables()
 
-    def _init_db(self) -> None:
-        """Create the recovery table if it doesn't exist."""
-        import sqlite3
-        import os
-
-        os.makedirs(os.path.dirname(self._db_path) or ".", exist_ok=True)
-        self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS open_executions (
-                execution_id TEXT PRIMARY KEY,
-                order_id TEXT,
-                symbol TEXT,
-                side TEXT,
-                quantity REAL,
-                broker TEXT,
-                mode TEXT,
-                status TEXT,
-                submitted_at REAL,
-                broker_order_id TEXT,
-                last_checked_at REAL,
-                check_count INTEGER
-            )
-        """)
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS filled_executions (
-                execution_id TEXT PRIMARY KEY,
-                order_id TEXT,
-                symbol TEXT,
-                side TEXT,
-                quantity REAL,
-                fill_price REAL,
-                broker TEXT,
-                mode TEXT,
-                filled_at REAL
-            )
-        """)
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS idempotency_store (
-                client_order_id TEXT PRIMARY KEY,
-                broker TEXT,
-                status TEXT,
-                broker_order_id TEXT,
-                created_at REAL
-            )
-        """)
-        self._conn.commit()
+    def _ensure_tables(self) -> None:
+        from backend.database import engine
+        Base.metadata.create_all(engine, checkfirst=True)
 
     def record_submission(
         self,
@@ -108,7 +104,6 @@ class ExecutionRecoveryManager:
         mode: str,
         broker_order_id: Optional[str] = None,
     ) -> None:
-        """Record that an order was submitted (called before broker API call)."""
         now = time.time()
         exec_record = OpenExecution(
             execution_id=execution_id,
@@ -124,99 +119,130 @@ class ExecutionRecoveryManager:
         )
         self._open_executions[execution_id] = exec_record
 
+        session = SessionLocal()
         try:
-            self._conn.execute(
-                """INSERT OR REPLACE INTO open_executions
-                   (execution_id, order_id, symbol, side, quantity, broker, mode,
-                    status, submitted_at, broker_order_id, last_checked_at, check_count)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (execution_id, order_id, symbol, side, quantity, broker, mode,
-                 "submitted", now, broker_order_id, 0, 0),
-            )
-            self._conn.commit()
+            session.add(OpenExecutionRow(
+                execution_id=execution_id,
+                order_id=order_id,
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+                broker=broker,
+                mode=mode,
+                status="submitted",
+                submitted_at=now,
+                broker_order_id=broker_order_id,
+                last_checked_at=0,
+                check_count=0,
+            ))
+            session.commit()
         except Exception as exc:
+            session.rollback()
             logger.warning("Failed to persist open execution: %s", exc)
+        finally:
+            session.close()
 
-    def record_fill(
-        self,
-        execution_id: str,
-        fill_price: float,
-    ) -> None:
-        """Record that an order was filled (called after broker confirms fill)."""
+    def record_fill(self, execution_id: str, fill_price: float) -> None:
         now = time.time()
         exec_record = self._open_executions.pop(execution_id, None)
 
+        session = SessionLocal()
         try:
-            self._conn.execute("DELETE FROM open_executions WHERE execution_id = ?", (execution_id,))
+            session.query(OpenExecutionRow).filter(
+                OpenExecutionRow.execution_id == execution_id
+            ).delete()
             if exec_record:
-                self._conn.execute(
-                    """INSERT INTO filled_executions
-                       (execution_id, order_id, symbol, side, quantity, fill_price, broker, mode, filled_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (execution_id, exec_record.order_id, exec_record.symbol, exec_record.side,
-                     exec_record.quantity, fill_price, exec_record.broker, exec_record.mode, now),
-                )
-            self._conn.commit()
+                session.add(FilledExecutionRow(
+                    execution_id=execution_id,
+                    order_id=exec_record.order_id,
+                    symbol=exec_record.symbol,
+                    side=exec_record.side,
+                    quantity=exec_record.quantity,
+                    fill_price=fill_price,
+                    broker=exec_record.broker,
+                    mode=exec_record.mode,
+                    filled_at=now,
+                ))
+            session.commit()
         except Exception as exc:
+            session.rollback()
             logger.warning("Failed to record fill: %s", exc)
+        finally:
+            session.close()
 
     def record_rejection(self, execution_id: str, reason: str = "") -> None:
-        """Record that an order was rejected."""
         self._open_executions.pop(execution_id, None)
+        session = SessionLocal()
         try:
-            self._conn.execute(
-                "UPDATE open_executions SET status = ? WHERE execution_id = ?",
-                (f"rejected:{reason[:100]}", execution_id),
-            )
-            self._conn.commit()
+            row = session.query(OpenExecutionRow).filter(
+                OpenExecutionRow.execution_id == execution_id
+            ).first()
+            if row:
+                row.status = f"rejected:{reason[:100]}"
+                session.commit()
         except Exception as exc:
+            session.rollback()
             logger.warning("Failed to record rejection: %s", exc)
+        finally:
+            session.close()
 
     def is_duplicate(self, client_order_id: str) -> bool:
-        """Check if an order has already been submitted (idempotency check)."""
+        session = SessionLocal()
         try:
-            row = self._conn.execute(
-                "SELECT status FROM idempotency_store WHERE client_order_id = ?",
-                (client_order_id,),
-            ).fetchone()
+            row = session.query(IdempotencyRow).filter(
+                IdempotencyRow.client_order_id == client_order_id
+            ).first()
             return row is not None
         except Exception:
             return False
+        finally:
+            session.close()
 
     def mark_submitted(self, client_order_id: str, broker: str, broker_order_id: str = "") -> None:
-        """Mark an order as submitted in the idempotency store."""
+        session = SessionLocal()
         try:
-            self._conn.execute(
-                """INSERT OR REPLACE INTO idempotency_store
-                   (client_order_id, broker, status, broker_order_id, created_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (client_order_id, broker, "submitted", broker_order_id, time.time()),
-            )
-            self._conn.commit()
+            existing = session.query(IdempotencyRow).filter(
+                IdempotencyRow.client_order_id == client_order_id
+            ).first()
+            if existing:
+                existing.broker = broker
+                existing.status = "submitted"
+                existing.broker_order_id = broker_order_id
+                existing.created_at = time.time()
+            else:
+                session.add(IdempotencyRow(
+                    client_order_id=client_order_id,
+                    broker=broker,
+                    status="submitted",
+                    broker_order_id=broker_order_id,
+                    created_at=time.time(),
+                ))
+            session.commit()
         except Exception as exc:
+            session.rollback()
             logger.warning("Failed to mark idempotency: %s", exc)
+        finally:
+            session.close()
 
     def load_open_executions(self) -> list[OpenExecution]:
-        """Load all open executions from the database (called on startup)."""
+        session = SessionLocal()
         try:
-            rows = self._conn.execute(
-                "SELECT execution_id, order_id, symbol, side, quantity, broker, mode, status, submitted_at, broker_order_id, last_checked_at, check_count FROM open_executions"
-            ).fetchall()
+            rows = session.query(OpenExecutionRow).all()
             executions = []
             for row in rows:
                 exec_record = OpenExecution(
-                    execution_id=row[0],
-                    order_id=row[1],
-                    symbol=row[2],
-                    side=row[3],
-                    quantity=row[4],
-                    broker=row[5],
-                    mode=row[6],
-                    status=row[7],
-                    submitted_at=row[8],
-                    broker_order_id=row[9],
-                    last_checked_at=row[10],
-                    check_count=row[11],
+                    execution_id=row.execution_id,
+                    order_id=row.order_id or "",
+                    symbol=row.symbol or "",
+                    side=row.side or "",
+                    quantity=row.quantity or 0,
+                    broker=row.broker or "",
+                    mode=row.mode or "",
+                    status=row.status or "submitted",
+                    submitted_at=row.submitted_at or 0,
+                    broker_order_id=row.broker_order_id,
+                    last_checked_at=row.last_checked_at or 0,
+                    check_count=row.check_count or 0,
                 )
                 self._open_executions[exec_record.execution_id] = exec_record
                 executions.append(exec_record)
@@ -225,14 +251,12 @@ class ExecutionRecoveryManager:
         except Exception as exc:
             logger.warning("Failed to load open executions: %s", exc)
             return []
+        finally:
+            session.close()
 
     def reconcile_with_broker(self, broker_adapter: Any) -> dict[str, str]:
-        """Check open executions against broker state and update accordingly.
-
-        Returns a dict of execution_id -> resolved_status ("filled", "expired", "still_open").
-        """
         results: dict[str, str] = {}
-        stale_threshold = 300  # 5 minutes without broker response = expired
+        stale_threshold = 300
         now = time.time()
 
         for exec_id, exec_record in list(self._open_executions.items()):
@@ -244,7 +268,6 @@ class ExecutionRecoveryManager:
                         self.record_fill(exec_id, fill_price=0.0)
                         continue
 
-                # Check if stale
                 age = now - exec_record.submitted_at
                 if age > stale_threshold or exec_record.check_count > 60:
                     results[exec_id] = "expired"
@@ -256,30 +279,36 @@ class ExecutionRecoveryManager:
                 exec_record.check_count += 1
                 exec_record.last_checked_at = now
 
-                # Update DB
-                self._conn.execute(
-                    "UPDATE open_executions SET check_count = ?, last_checked_at = ? WHERE execution_id = ?",
-                    (exec_record.check_count, exec_record.last_checked_at, exec_id),
-                )
+                session = SessionLocal()
+                try:
+                    row = session.query(OpenExecutionRow).filter(
+                        OpenExecutionRow.execution_id == exec_id
+                    ).first()
+                    if row:
+                        row.check_count = exec_record.check_count
+                        row.last_checked_at = exec_record.last_checked_at
+                        session.commit()
+                except Exception:
+                    session.rollback()
+                finally:
+                    session.close()
+
             except Exception as exc:
                 logger.warning("Reconciliation failed for %s: %s", exec_id, exc)
                 results[exec_id] = "error"
 
-        self._conn.commit()
         return results
 
     def get_open_count(self) -> int:
-        """Return the number of open executions."""
         return len(self._open_executions)
 
     def get_stats(self) -> dict[str, Any]:
-        """Return recovery stats for health checks."""
+        session = SessionLocal()
         try:
-            open_count = self._conn.execute("SELECT COUNT(*) FROM open_executions").fetchone()[0]
-            filled_today = self._conn.execute(
-                "SELECT COUNT(*) FROM filled_executions WHERE filled_at > ?",
-                (time.time() - 86400,),
-            ).fetchone()[0]
+            open_count = session.query(OpenExecutionRow).count()
+            filled_today = session.query(FilledExecutionRow).filter(
+                FilledExecutionRow.filled_at > time.time() - 86400
+            ).count()
             return {
                 "open_executions": open_count,
                 "filled_today": filled_today,
@@ -287,3 +316,5 @@ class ExecutionRecoveryManager:
             }
         except Exception:
             return {"open_executions": 0, "filled_today": 0, "in_memory_open": len(self._open_executions)}
+        finally:
+            session.close()

@@ -55,6 +55,7 @@ class TradingSystemRuntime:
         self.symbol_master = symbol_master
         self.live_broker = live_broker
         self.trading_mode = str(trading_mode or "paper").lower().strip()
+        self.is_shadow = self.trading_mode == "shadow"
         self.broker_mode = "live" if self.trading_mode == "live" and self.live_broker is not None else "paper"
         self.position_manager = PositionManager()
         self.charges_engine = ChargesEngine(min_profitability_ratio=float(os.getenv("MIN_PROFITABILITY_RATIO", "3.0")))
@@ -66,7 +67,7 @@ class TradingSystemRuntime:
         self._tasks: dict[str, asyncio.Task[Any]] = {}
         self._running = False
         self._watchlist_symbols: list[str] = []
-        self._market_data_enabled = _flag_enabled("ENABLE_MARKET_DATA") or self.trading_mode == "live"
+        self._market_data_enabled = _flag_enabled("ENABLE_MARKET_DATA") or self.trading_mode in ("live", "shadow")
         self._paper_router = PaperBrokerRouter({"upstox": PaperBroker(broker_name="upstox")})
         self.broker_adapter = self.live_broker if self.broker_mode == "live" and self.live_broker is not None else self._paper_router
         if self.broker_mode == "paper" and self.live_broker is None and self.trading_mode == "live":
@@ -204,6 +205,7 @@ class TradingSystemRuntime:
         snapshot: dict[str, Any] = {
             "running": self._running,
             "mode": self.trading_mode,
+            "is_shadow": self.is_shadow,
             "broker_mode": self.broker_mode,
             "watchlist_symbols": list(self._watchlist_symbols),
             "watchlist_count": len(self._watchlist_symbols),

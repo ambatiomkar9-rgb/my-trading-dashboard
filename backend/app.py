@@ -266,7 +266,7 @@ def _load_persisted_settings() -> dict[str, Any]:
 def _load_trading_mode() -> str:
     settings = _load_persisted_settings()
     value = str(settings.get("trading_mode") or os.getenv("TRADING_MODE", "paper")).strip().lower()
-    return value if value in {"paper", "live"} else "paper"
+    return value if value in {"paper", "live", "shadow"} else "paper"
 
 
 def _load_trading_enabled() -> bool:
@@ -740,28 +740,35 @@ async def _process_chat_command(app: FastAPI, command_id: str, message: str) -> 
             f"Portfolio: {portfolio}."
         )
         reply = ""
-        async with httpx.AsyncClient(timeout=20, trust_env=False) as client:
-            try:
-                response = await client.post(
-                    f"{cfg.ollama_url.rstrip('/')}/api/chat",
-                    json={
-                        "model": cfg.ollama_model,
-                        "messages": [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": message},
-                        ],
-                        "stream": False,
-                    },
-                )
-                response.raise_for_status()
-                payload = response.json()
-                reply = (
-                    payload.get("message", {}).get("content")
-                    or payload.get("response")
-                    or ""
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Ollama chat failed, using fallback: %s", exc)
+        from backend.infra.circuit_breaker import get_breaker
+        ollama_br = get_breaker("ollama", failure_threshold=3, recovery_timeout=30)
+        if not ollama_br.allow_request():
+            logger.warning("Ollama circuit breaker OPEN — using fallback reply")
+        else:
+            async with httpx.AsyncClient(timeout=20, trust_env=False) as client:
+                try:
+                    response = await client.post(
+                        f"{cfg.ollama_url.rstrip('/')}/api/chat",
+                        json={
+                            "model": cfg.ollama_model,
+                            "messages": [
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": message},
+                            ],
+                            "stream": False,
+                        },
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                    reply = (
+                        payload.get("message", {}).get("content")
+                        or payload.get("response")
+                        or ""
+                    )
+                    ollama_br.record_success()
+                except Exception as exc:  # noqa: BLE001
+                    ollama_br.record_failure()
+                    logger.warning("Ollama chat failed, using fallback: %s", exc)
 
         if not reply:
             reply = (
@@ -1033,6 +1040,60 @@ async def supervisor_status(request: Request) -> dict[str, Any]:
         "agents": supervisor.status() if supervisor else {},
         "execution_recovery": execution_recovery.get_stats() if execution_recovery else {},
     }
+
+
+@app.get("/api/circuit-breakers")
+async def circuit_breaker_status() -> dict[str, Any]:
+    """Return status of all circuit breakers protecting external API calls."""
+    from backend.infra.circuit_breaker import all_breakers_status
+    return all_breakers_status()
+
+
+@app.post("/api/circuit-breakers/{name}/reset")
+async def reset_circuit_breaker(name: str) -> dict[str, Any]:
+    """Force-reset a specific circuit breaker to CLOSED."""
+    from backend.infra.circuit_breaker import get_breaker
+    breaker = get_breaker(name)
+    breaker.reset()
+    return {"ok": True, "name": name, "state": breaker.state.value}
+
+
+@app.get("/api/events/dead-letter")
+async def dead_letters(limit: int = 50) -> list[dict[str, Any]]:
+    """Return events that failed processing and were moved to the dead-letter queue."""
+    event_store = getattr(app.state, "event_store", None)
+    if event_store is None:
+        return []
+    return event_store.get_dead_letters(limit=limit)
+
+
+@app.get("/api/events/replay")
+async def replay_events(
+    from_time: Optional[str] = None,
+    event_type: Optional[str] = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Replay events from a given timestamp."""
+    event_store = getattr(app.state, "event_store", None)
+    if event_store is None:
+        return []
+    from_dt = None
+    if from_time:
+        try:
+            from_dt = datetime.fromisoformat(from_time)
+        except ValueError:
+            pass
+    return event_store.replay_events(from_time=from_dt, event_type=event_type, limit=limit)
+
+
+@app.post("/api/events/cleanup")
+async def cleanup_events() -> dict[str, Any]:
+    """Remove expired events based on TTL."""
+    event_store = getattr(app.state, "event_store", None)
+    if event_store is None:
+        return {"removed": 0}
+    count = event_store.cleanup_expired()
+    return {"removed": count}
 
 
 @app.websocket("/ws/agent-monitor")

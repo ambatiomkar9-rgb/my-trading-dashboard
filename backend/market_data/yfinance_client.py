@@ -49,6 +49,17 @@ def _resolve_symbol(symbol: str) -> str:
     return sym
 
 
+_yf_breaker = None
+
+
+def _get_yf_breaker():
+    global _yf_breaker
+    if _yf_breaker is None:
+        from backend.infra.circuit_breaker import get_breaker
+        _yf_breaker = get_breaker("yfinance", failure_threshold=5, recovery_timeout=60)
+    return _yf_breaker
+
+
 def fetch_ohlcv(
     symbol: str,
     timeframe: str = "1d",
@@ -69,6 +80,11 @@ def fetch_ohlcv(
     Returns:
         DataFrame with columns: Open, High, Low, Close, Volume or None on error
     """
+    breaker = _get_yf_breaker()
+    if not breaker.allow_request():
+        logger.warning("yfinance circuit breaker is OPEN — skipping %s", symbol)
+        return None
+
     if yf is None:
         logger.warning("yfinance not installed; cannot fetch market data")
         return None
@@ -116,9 +132,11 @@ def fetch_ohlcv(
         df["timestamp"] = df.index.strftime("%Y-%m-%d %H:%M:%S")
         df = df.reset_index(drop=True)
 
+        breaker.record_success()
         return df
 
     except Exception as exc:
+        breaker.record_failure()
         logger.error("Failed to fetch OHLCV for %s: %s", yf_symbol, exc)
         return None
 
