@@ -274,7 +274,8 @@ class TradingSystemRuntime:
             self.whale_agent = WhaleIntelligenceAgent(self.event_bus)
             self._spawn("whale", self.whale_agent.start())
 
-            if os.getenv("TELEGRAM_BOT_TOKEN", "").strip() and os.getenv("DASHBOARD_API_TOKEN", "").strip():
+            telegram_disabled = os.getenv("TELEGRAM_DISABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+            if not telegram_disabled and os.getenv("TELEGRAM_BOT_TOKEN", "").strip() and os.getenv("DASHBOARD_API_TOKEN", "").strip():
                 self.telegram_poller = TelegramCallbackPoller()
                 self._spawn("telegram", self.telegram_poller.start())
 
