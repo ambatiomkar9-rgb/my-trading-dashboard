@@ -1,11 +1,11 @@
 #!/bin/bash
 set -e
 
-# Install main trading_system dependencies
-echo "Installing main trading_system Python dependencies..."
-pip install -r requirements.txt
+# Install backend Python dependencies
+echo "Installing backend Python dependencies..."
+pip install -r trading-dashboard/backend/requirements.txt
 
-# Build frontend if not skipped (assuming frontend is in trading-dashboard/frontend)
+# Build frontend if not skipped
 if [ "${SKIP_FRONTEND_BUILD}" = "true" ]; then
   echo "SKIP_FRONTEND_BUILD=true; skipping frontend build."
 else
@@ -17,7 +17,7 @@ else
     npm install
   fi
   npm run build
-  cd ../.. # Go back to root
+  cd ../..  # Go back to root
 fi
 
 echo "Build complete!"
