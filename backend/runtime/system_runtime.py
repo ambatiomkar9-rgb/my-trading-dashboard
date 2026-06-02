@@ -64,6 +64,11 @@ class TradingSystemRuntime:
         self.position_manager = PositionManager()
         self.charges_engine = ChargesEngine(min_profitability_ratio=float(os.getenv("MIN_PROFITABILITY_RATIO", "3.0")))
         self.risk_guardian = RiskGuardian(self.charges_engine)
+        try:
+            from backend.risk.production_risk_manager import ProductionRiskManager
+            self.production_risk = ProductionRiskManager()
+        except Exception:
+            self.production_risk = None
         self.market_data: MarketDataEngine | None = None
         self.news_agent: NewsSentimentAgent | None = None
         self.macro_agent: MacroIntelligenceAgent | None = None
@@ -84,6 +89,7 @@ class TradingSystemRuntime:
             charges_engine=self.charges_engine,
             position_manager=self.position_manager,
             event_bus=self.event_bus,
+            production_risk=self.production_risk,
         )
 
     def _load_watchlist_symbols(self) -> list[str]:

@@ -7,7 +7,7 @@ import os
 import time
 import uuid
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
 try:
@@ -18,6 +18,18 @@ except ModuleNotFoundError:  # noqa: BLE001
     from notifications.telegram_bot import send_approval_request  # type: ignore
 
 logger = logging.getLogger(__name__)
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _is_market_hours() -> bool:
+    """Check if current time is within Indian market hours (9:15 AM - 3:30 PM IST)."""
+    now = datetime.now(IST)
+    if now.weekday() >= 5:
+        return False
+    market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
+    market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    return market_open <= now <= market_close
 
 
 def _normalize_symbol(symbol: str) -> str:
@@ -101,6 +113,8 @@ class TechnicalAnalysisAgent:
     async def _on_market_tick(self, payload: dict[str, Any]) -> None:
         """Process each incoming market tick and emit a signal when conditions align."""
         try:
+            if not _is_market_hours():
+                return
             symbol = _normalize_symbol(str(payload.get("symbol") or ""))
             if not symbol or not self._watchlist or symbol not in self._watchlist:
                 return
@@ -115,8 +129,10 @@ class TechnicalAnalysisAgent:
                 return
 
             prices = list(history)
-            fast_window = prices[-3:]
-            slow_window = prices[-8:]
+            fast_len = min(5, len(prices) // 2)
+            slow_len = min(15, len(prices) - 1)
+            fast_window = prices[-fast_len:]
+            slow_window = prices[-slow_len:]
             fast_avg = sum(fast_window) / len(fast_window)
             slow_avg = sum(slow_window) / len(slow_window)
             momentum = ((prices[-1] - prices[0]) / prices[0]) * 100 if prices[0] else 0.0
@@ -188,6 +204,14 @@ class TechnicalAnalysisAgent:
             finally:
                 session.close()
 
+            atr = 0.0
+            if len(prices) >= 14:
+                highs = prices[-14:]
+                avg_range = (max(highs) - min(highs)) / len(highs)
+                atr = avg_range if avg_range > 0 else price * 0.02
+            else:
+                atr = price * 0.02
+
             payload = {
                 "id": signal_id,
                 "symbol": symbol,
@@ -208,7 +232,9 @@ class TechnicalAnalysisAgent:
                 "approval_status": "pending",
                 "broker": "upstox",
                 "trade_segment": "intraday",
-                "expected_exit": round(float(price) * (1.03 if signal_type == "buy" else 0.97), 2),
+                "expected_exit": round(float(price) + (2.0 * atr if signal_type == "buy" else -2.0 * atr), 2),
+                "stop_loss": round(float(price) - (1.5 * atr if signal_type == "buy" else -1.5 * atr), 2),
+                "atr": round(atr, 2),
             }
 
             if self._bus is not None and hasattr(self._bus, "publish"):

@@ -1368,6 +1368,46 @@ async def system_health(request: Request) -> dict[str, Any]:
     }
 
 
+@app.get("/api/risk/status")
+async def risk_status(request: Request) -> dict[str, Any]:
+    """Return production risk manager state."""
+    runtime = _runtime(request)
+    prod_risk = getattr(runtime, "production_risk", None)
+    if prod_risk is None:
+        return {"enabled": False, "reason": "ProductionRiskManager not loaded"}
+    try:
+        positions = runtime.position_manager.get_all()
+        equity = 100000.0
+        dd = prod_risk.drawdown
+        return {
+            "enabled": True,
+            "config": {
+                "risk_per_trade_pct": prod_risk.config.risk_per_trade_pct,
+                "max_open_positions": prod_risk.config.max_open_positions,
+                "max_portfolio_heat_pct": prod_risk.config.max_portfolio_heat_pct,
+                "max_drawdown_pct": prod_risk.config.max_drawdown_pct,
+                "max_daily_loss_pct": prod_risk.config.max_daily_loss_pct,
+                "max_weekly_loss_pct": prod_risk.config.max_weekly_loss_pct,
+                "max_monthly_loss_pct": prod_risk.config.max_monthly_loss_pct,
+                "max_price_deviation_pct": prod_risk.config.max_price_deviation_pct,
+                "max_trades_per_day": prod_risk.config.max_trades_per_day,
+                "min_signal_confidence": prod_risk.config.min_signal_confidence,
+            },
+            "state": {
+                "halted": dd.is_halted,
+                "peak_equity": dd._peak_equity,
+                "daily_pnl": dd._daily_pnl,
+                "weekly_pnl": dd._weekly_pnl,
+                "monthly_pnl": dd._monthly_pnl,
+                "trades_today": dd._trades_today,
+                "portfolio_heat": prod_risk.heat.calculate_heat(positions, equity),
+                "open_positions": sum(1 for p in positions if abs(int(p.get("quantity", 0))) > 0),
+            },
+        }
+    except Exception as exc:
+        return {"enabled": True, "error": str(exc)}
+
+
 @app.get("/api/runtime/status")
 async def runtime_status(request: Request) -> dict[str, Any]:
     """Expose the runtime snapshot for debugging and the agent monitor UI."""

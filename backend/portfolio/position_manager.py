@@ -97,9 +97,15 @@ class PositionManager:
                 pos["quantity"] = new_qty
                 pos["avg_entry"] = fill_price
                 pos["side"] = "short"
+        elif current_qty == 0:
+            logger.warning("Sell rejected: no position to sell for %s", pos.get("symbol"))
+            return
         else:
             short_qty = abs(current_qty)
             new_short_qty = short_qty + quantity
+            if new_short_qty > 100:
+                logger.warning("Sell rejected: naked short would exceed 100 shares for %s", pos.get("symbol"))
+                return
             if current_qty < 0:
                 pos["avg_entry"] = self._weighted_average(short_qty, float(pos["avg_entry"]), quantity, fill_price)
             pos["quantity"] = -new_short_qty

@@ -48,9 +48,11 @@ class TradeExecutionAgent:
         charges_engine: Any,
         position_manager: PositionManager,
         event_bus: Any,
+        production_risk: Any = None,
     ) -> None:
         self.broker = broker_router
         self.risk = risk_guardian
+        self.prod_risk = production_risk
         self.charges = charges_engine
         self.positions = position_manager
         self.bus = event_bus
@@ -269,6 +271,38 @@ class TradeExecutionAgent:
                 )
                 await self._update_signal_status(signal_id, "rejected", reason)
                 return
+
+            if self.prod_risk is not None:
+                try:
+                    all_positions = self.positions.get_all()
+                    equity = risk_result.get("equity", 100000.0)
+                    confidence = float(signal.get("overall_score") or signal.get("technical_score") or 1.0)
+                    stop_price = price * (0.95 if side == "buy" else 1.05)
+                    prod_check = await self.prod_risk.validate_order(
+                        side=side,
+                        symbol=symbol,
+                        quantity=quantity,
+                        price=price,
+                        stop_price=stop_price,
+                        entry_price=price,
+                        positions=all_positions,
+                        equity=equity,
+                        last_price=price,
+                        confidence=confidence,
+                        current_price=price,
+                    )
+                    if prod_check.get("action") == "REJECT":
+                        reason = f"ProductionRisk: {prod_check.get('reason', 'unknown')}"
+                        logger.warning(reason)
+                        await self._save_execution(
+                            client_order_id, None, signal_id, broker_name, symbol, side, quantity, price,
+                            "rejected_risk", reason,
+                        )
+                        await self._update_signal_status(signal_id, "rejected", reason)
+                        return
+                    quantity = prod_check.get("adjusted_qty", quantity)
+                except Exception as exc:
+                    logger.warning("ProductionRisk check failed (falling back): %s", exc)
 
             await self._update_signal_status(signal_id, "executing", None)
 
