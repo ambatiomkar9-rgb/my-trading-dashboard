@@ -28,6 +28,15 @@ from typing import Any, Optional
 
 import httpx
 
+# Load .env file from project root
+try:
+    from dotenv import load_dotenv
+    _env_path = Path(__file__).resolve().parents[1] / ".env"
+    if _env_path.exists():
+        load_dotenv(_env_path)
+except ImportError:
+    pass
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
