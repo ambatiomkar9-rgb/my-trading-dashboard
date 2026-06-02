@@ -137,6 +137,13 @@ class NewsSentimentAgent:
 
     async def _fetch(self, symbol: str, newsapi_key: str | None = None) -> list[dict]:
         """Fetch recent articles for a symbol from NewsAPI."""
+        from backend.infra.circuit_breaker import get_breaker
+
+        breaker = get_breaker("newsapi", failure_threshold=5, recovery_timeout=300)
+        if not breaker.allow_request():
+            logger.warning("NewsAPI circuit breaker OPEN — skipping %s", symbol)
+            return []
+
         try:
             key = (newsapi_key or os.getenv("NEWSAPI_KEY", "").strip() or NEWSAPI_KEY).strip()
             params = {
@@ -154,8 +161,10 @@ class NewsSentimentAgent:
                 resp = await client.get(NEWSAPI_URL, params=params)
                 resp.raise_for_status()
                 payload = resp.json()
+                breaker.record_success()
                 return payload.get("articles", []) if isinstance(payload, dict) else []
         except httpx.HTTPStatusError as exc:
+            breaker.record_failure()
             if exc.response.status_code == 429:
                 logger.warning("NewsAPI rate limit hit. Sleeping 1h.")
                 await asyncio.sleep(3600)
@@ -163,5 +172,6 @@ class NewsSentimentAgent:
                 logger.error("NewsAPI key invalid. Check NEWSAPI_KEY env var.")
             return []
         except Exception as exc:  # noqa: BLE001
+            breaker.record_failure()
             logger.error("NewsAPI fetch error: %s", exc)
             return []

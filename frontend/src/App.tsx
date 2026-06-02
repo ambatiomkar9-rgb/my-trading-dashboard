@@ -14,6 +14,7 @@ import { SignalsPage } from './components/SignalsPage';
 import { PortfolioPage } from './components/PortfolioPage';
 import { LiveStatusPanel } from './components/LiveStatusPanel';
 import { BrokerReconciliation } from './components/BrokerReconciliation';
+import { PerformancePage } from './components/PerformancePage';
 
 type Page =
   | 'overview'
@@ -25,6 +26,7 @@ type Page =
   | 'strategies'
   | 'backtesting'
   | 'screener'
+  | 'performance'
   | 'settings'
   | 'animation'
   | 'live-status'
@@ -56,6 +58,7 @@ function DashboardContent() {
       case 'strategies': return <StrategiesPage />;
       case 'backtesting': return <BacktestingPage />;
       case 'screener': return <StockScreener />;
+      case 'performance': return <PerformancePage />;
       case 'settings': return <SettingsPage />;
       case 'animation': return <AgentAnimation />;
       case 'watchlist': return <WatchlistPage />;
@@ -92,6 +95,7 @@ function DashboardContent() {
               'strategies',
               'backtesting',
               'screener',
+              'performance',
               'live-status',
               'broker-recon',
               'settings',

@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { api } from '../api';
 
 const API_URL = '';
 
@@ -50,17 +51,10 @@ export function SignalsPage() {
   const approve = async (id: string) => {
     setApproving(id);
     try {
-      const res = await fetch(`${API_URL}/api/signal/approve`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ signal_id: id }),
-      });
-      const data = await safeJson(res);
-      if (!res.ok) {
-        alert(data?.detail || data?.raw || `HTTP ${res.status}`);
-        return;
-      }
+      await api.post('/api/signal/approve', { signal_id: id });
       await refresh();
+    } catch (error: any) {
+      alert(error?.message || 'Failed to approve signal');
     } finally {
       setApproving(null);
     }
@@ -69,15 +63,14 @@ export function SignalsPage() {
   const skip = async (id: string) => {
     setSkipping(id);
     try {
-      const res = await fetch(`${API_URL}/api/signal/skip`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ signal_id: id, reason: 'Skipped from dashboard' }),
-      });
-      const data = await safeJson(res);
-      if (!res.ok) {
-        alert(data?.detail || data?.raw || `HTTP ${res.status}`);
-        return;
+      await api.post('/api/signal/skip', { signal_id: id, reason: 'Skipped from dashboard' });
+      await refresh();
+    } catch (error: any) {
+      alert(error?.message || 'Failed to skip signal');
+    } finally {
+      setSkipping(null);
+    }
+  };
       }
       await refresh();
     } finally {

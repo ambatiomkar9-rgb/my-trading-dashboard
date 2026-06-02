@@ -4,66 +4,51 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import sqlite3
 import time
-from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
-DB_PATH = Path(os.getenv("POSITIONS_DB_PATH", "data/positions.db"))
+
+
+def _normalize_symbol(symbol: str) -> str:
+    return (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
 
 
 class PositionManager:
-    """SQLite-backed position ledger shared by local agents."""
+    """PostgreSQL-backed position ledger shared by local agents."""
 
     def __init__(self) -> None:
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        self._init_db()
         self._cache: dict[str, dict] = {}
         self._lock = asyncio.Lock()
         self._load_from_db()
 
-    def _init_db(self) -> None:
-        with sqlite3.connect(DB_PATH) as con:
-            con.execute(
-                """
-                CREATE TABLE IF NOT EXISTS positions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    broker TEXT NOT NULL,
-                    symbol TEXT NOT NULL,
-                    side TEXT NOT NULL,
-                    quantity INTEGER NOT NULL DEFAULT 0,
-                    avg_entry REAL NOT NULL DEFAULT 0,
-                    current_price REAL DEFAULT 0,
-                    unrealized_pnl REAL DEFAULT 0,
-                    realized_pnl REAL DEFAULT 0,
-                    updated_at INTEGER DEFAULT 0,
-                    UNIQUE(broker, symbol)
-                )
-                """
-            )
-
-    @staticmethod
-    def _normalize_symbol(symbol: str) -> str:
-        return (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+    def _get_session(self):
+        from backend.database import SessionLocal
+        return SessionLocal()
 
     def _load_from_db(self) -> None:
-        with sqlite3.connect(DB_PATH) as con:
-            con.row_factory = sqlite3.Row
-            rows = con.execute("SELECT * FROM positions").fetchall()
-        for row in rows:
-            key = f"{str(row['broker']).lower()}_{self._normalize_symbol(str(row['symbol']))}"
-            self._cache[key] = {
-                "broker": str(row["broker"]).lower(),
-                "symbol": self._normalize_symbol(str(row["symbol"])),
-                "side": str(row["side"] or "flat").lower(),
-                "quantity": int(row["quantity"] or 0),
-                "avg_entry": float(row["avg_entry"] or 0.0),
-                "current_price": float(row["current_price"] or 0.0),
-                "unrealized_pnl": float(row["unrealized_pnl"] or 0.0),
-                "realized_pnl": float(row["realized_pnl"] or 0.0),
-            }
-        logger.info("Loaded %d positions from DB", len(self._cache))
+        try:
+            from backend.database import engine
+            from sqlalchemy import text
+
+            with engine.connect() as conn:
+                result = conn.execute(text("SELECT * FROM positions"))
+                rows = result.mappings().all()
+            for row in rows:
+                key = f"{str(row['broker']).lower()}_{_normalize_symbol(str(row['symbol']))}"
+                self._cache[key] = {
+                    "broker": str(row["broker"]).lower(),
+                    "symbol": _normalize_symbol(str(row["symbol"])),
+                    "side": str(row["side"] or "flat").lower(),
+                    "quantity": int(row["quantity"] or 0),
+                    "avg_entry": float(row["avg_entry_price"] or 0.0),
+                    "current_price": float(row["current_price"] or 0.0),
+                    "unrealized_pnl": float(row["unrealized_pnl"] or 0.0),
+                    "realized_pnl": float(row["realized_pnl"] or 0.0),
+                }
+            logger.info("Loaded %d positions from DB", len(self._cache))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not load positions from DB: %s", exc)
 
     @staticmethod
     def _weighted_average(existing_qty: int, existing_price: float, added_qty: int, added_price: float) -> float:
@@ -133,7 +118,7 @@ class PositionManager:
         try:
             async with self._lock:
                 broker_name = (broker or "").lower().strip()
-                sym = self._normalize_symbol(symbol)
+                sym = _normalize_symbol(symbol)
                 fill_qty = abs(int(quantity))
                 fill_price = float(fill_price)
                 key = f"{broker_name}_{sym}"
@@ -165,7 +150,7 @@ class PositionManager:
         """Update unrealized PnL for any positions matching the symbol."""
         try:
             async with self._lock:
-                sym = self._normalize_symbol(symbol)
+                sym = _normalize_symbol(symbol)
                 for pos in self._cache.values():
                     if pos["symbol"] != sym or int(pos["quantity"]) == 0:
                         continue
@@ -180,7 +165,7 @@ class PositionManager:
 
     def get_position(self, broker: str, symbol: str) -> Optional[dict]:
         """Fetch one position from cache."""
-        key = f"{(broker or '').lower().strip()}_{self._normalize_symbol(symbol)}"
+        key = f"{(broker or '').lower().strip()}_{_normalize_symbol(symbol)}"
         return self._cache.get(key)
 
     def get_all(self, broker: Optional[str] = None) -> list[dict]:
@@ -207,7 +192,7 @@ class PositionManager:
             broker_name = broker.lower().strip()
             broker_map: dict[str, dict] = {}
             for remote in broker_positions or []:
-                sym = self._normalize_symbol(str(remote.get("symbol") or remote.get("trading_symbol") or ""))
+                sym = _normalize_symbol(str(remote.get("symbol") or remote.get("trading_symbol") or ""))
                 if sym:
                     broker_map[sym] = remote
 
@@ -244,37 +229,42 @@ class PositionManager:
             return [{"issue": "reconcile_error", "error": str(exc)}]
 
     async def _save(self, key: str) -> None:
-        """Persist a cached position row to SQLite."""
+        """Persist a cached position row to PostgreSQL."""
         try:
             pos = self._cache[key]
-            with sqlite3.connect(DB_PATH) as con:
-                con.execute(
-                    """
-                    INSERT INTO positions (
-                        broker, symbol, side, quantity, avg_entry, current_price,
-                        unrealized_pnl, realized_pnl, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(broker, symbol) DO UPDATE SET
-                        side=excluded.side,
-                        quantity=excluded.quantity,
-                        avg_entry=excluded.avg_entry,
-                        current_price=excluded.current_price,
-                        unrealized_pnl=excluded.unrealized_pnl,
-                        realized_pnl=excluded.realized_pnl,
-                        updated_at=excluded.updated_at
-                    """,
-                    (
-                        pos["broker"],
-                        pos["symbol"],
-                        pos["side"],
-                        int(pos["quantity"]),
-                        float(pos["avg_entry"]),
-                        float(pos["current_price"]),
-                        float(pos["unrealized_pnl"]),
-                        float(pos["realized_pnl"]),
-                        int(time.time()),
-                    ),
+            from backend.database import engine
+            from sqlalchemy import text
+
+            now = int(time.time())
+            with engine.connect() as conn:
+                conn.execute(
+                    text("""
+                        INSERT INTO positions (
+                            broker, symbol, side, quantity, avg_entry_price, current_price,
+                            unrealized_pnl, realized_pnl, last_updated
+                        ) VALUES (:broker, :symbol, :side, :quantity, :avg_entry, :current_price,
+                                  :unrealized_pnl, :realized_pnl, :last_updated)
+                        ON CONFLICT (broker, symbol) DO UPDATE SET
+                            side=EXCLUDED.side,
+                            quantity=EXCLUDED.quantity,
+                            avg_entry_price=EXCLUDED.avg_entry_price,
+                            current_price=EXCLUDED.current_price,
+                            unrealized_pnl=EXCLUDED.unrealized_pnl,
+                            realized_pnl=EXCLUDED.realized_pnl,
+                            last_updated=EXCLUDED.last_updated
+                    """),
+                    {
+                        "broker": pos["broker"],
+                        "symbol": pos["symbol"],
+                        "side": pos["side"],
+                        "quantity": int(pos["quantity"]),
+                        "avg_entry": float(pos["avg_entry"]),
+                        "current_price": float(pos["current_price"]),
+                        "unrealized_pnl": float(pos["unrealized_pnl"]),
+                        "realized_pnl": float(pos["realized_pnl"]),
+                        "last_updated": now,
+                    },
                 )
+                conn.commit()
         except Exception as exc:  # noqa: BLE001
             logger.error("_save failed: %s", exc)
-

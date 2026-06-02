@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import random
-import sqlite3
 import sys
 import uuid
 from contextlib import asynccontextmanager
@@ -21,7 +20,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from backend.auth import create_token, require_admin, verify_token
+from backend.auth import create_token, require_admin, verify_token, verify_token_or_service
 from backend.brokerage.charges_engine import ChargesEngine, TradeSegment
 from backend.brokers.upstox_broker import broker_from_env
 from backend.config.trading_config import disable_trading, enable_trading, is_trading_enabled
@@ -50,6 +49,7 @@ from backend.risk.risk_guardian import RiskGuardian
 from backend.runtime.system_runtime import TradingSystemRuntime, build_runtime
 from backend.runtime.service_supervisor import ServiceSupervisor
 from backend.runtime.execution_recovery import ExecutionRecoveryManager
+from backend.strategy.strategy_engine import StrategyEngine
 from backend.user_store import create_user, ensure_default_admin, update_password, verify_user
 
 logger = logging.getLogger(__name__)
@@ -58,7 +58,6 @@ logging.basicConfig(level=logging.INFO)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FRONTEND_DIST = REPO_ROOT / "frontend" / "dist"
 INDEX_HTML = FRONTEND_DIST / "index.html"
-EXECUTIONS_DB = REPO_ROOT / "data" / "executions.db"
 
 SETTINGS_ENV_MAP = {
     "api_key": "UPSTOX_API_KEY",
@@ -365,6 +364,33 @@ def _signal_row(session, item: TradeSignal) -> dict[str, Any]:
         .first()
     )
     quantity = int(getattr(watch, "quantity_to_buy", 1) or 1) if watch else 1
+
+    # Compute multi-factor overall score if individual scores exist
+    overall = float(item.overall_score or 0.0)
+    tech = float(item.technical_score or 0.0)
+    news = float(item.news_score or 0.0)
+    fundamental = float(item.fundamental_score or 0.0)
+    risk = float(item.risk_score or 0.0)
+    if overall == 0.0 and (tech or news or fundamental or risk):
+        # Weighted average: technical 40%, news 25%, fundamental 20%, risk 15% (inverted)
+        scores = []
+        weights = []
+        if tech:
+            scores.append(tech)
+            weights.append(0.40)
+        if news:
+            scores.append(news)
+            weights.append(0.25)
+        if fundamental:
+            scores.append(fundamental)
+            weights.append(0.20)
+        if risk:
+            scores.append(100.0 - risk)  # Invert risk (lower risk = higher score)
+            weights.append(0.15)
+        if weights:
+            total_w = sum(weights)
+            overall = round(sum(s * w for s, w in zip(scores, weights)) / total_w, 1)
+
     return {
         "id": str(item.id),
         "symbol": item.symbol,
@@ -376,11 +402,11 @@ def _signal_row(session, item: TradeSignal) -> dict[str, Any]:
         "price": item.signal_price,
         "signal_price": item.signal_price,
         "signal_time": item.signal_time,
-        "technical_score": item.technical_score,
-        "news_score": item.news_score,
-        "fundamental_score": item.fundamental_score,
-        "risk_score": item.risk_score,
-        "overall_score": item.overall_score,
+        "technical_score": tech,
+        "news_score": news,
+        "fundamental_score": fundamental,
+        "risk_score": risk,
+        "overall_score": overall,
         "approval_status": item.approval_status,
         "approval_time": item.approval_time,
         "approval_reason": item.approval_reason,
@@ -433,37 +459,36 @@ def _strategy_payload(session, strategy: Strategy) -> dict[str, Any]:
 
 
 def _read_executions_db() -> list[dict[str, Any]]:
-    if not EXECUTIONS_DB.exists():
-        return []
-    rows: list[dict[str, Any]] = []
     try:
-        with sqlite3.connect(EXECUTIONS_DB) as con:
-            con.row_factory = sqlite3.Row
-            result = con.execute(
-                """
-                SELECT client_order_id, broker_order_id, signal_id, broker, symbol, side,
-                       quantity, entry_price, status, reject_reason, created_at
-                FROM executions
-                ORDER BY created_at DESC
-                """
-            ).fetchall()
-        for row in result:
+        from backend.database import engine
+        from sqlalchemy import text
+
+        with engine.connect() as conn:
+            result = conn.execute(text(
+                "SELECT client_order_id, broker_order_id, signal_id, broker, symbol, side, "
+                "quantity, entry_price, status, reject_reason, created_at "
+                "FROM executions ORDER BY created_at DESC"
+            ))
+            db_rows = result.fetchall()
+        rows: list[dict[str, Any]] = []
+        for row in db_rows:
             rows.append(
                 {
-                    "id": str(row["client_order_id"] or row["broker_order_id"] or uuid.uuid4().hex),
-                    "symbol": str(row["symbol"] or ""),
-                    "side": str(row["side"] or "buy"),
-                    "qty": int(row["quantity"] or 0),
-                    "price": float(row["entry_price"] or 0.0),
-                    "status": str(row["status"] or "submitted"),
-                    "timestamp": datetime.fromtimestamp(int(row["created_at"] or 0), tz=timezone.utc).isoformat()
-                    if row["created_at"]
+                    "id": str(row[0] or row[1] or uuid.uuid4().hex),
+                    "symbol": str(row[4] or ""),
+                    "side": str(row[5] or "buy"),
+                    "qty": int(row[6] or 0),
+                    "price": float(row[7] or 0.0),
+                    "status": str(row[8] or "submitted"),
+                    "timestamp": datetime.fromtimestamp(int(row[10] or 0), tz=timezone.utc).isoformat()
+                    if row[10]
                     else _utc_now(),
                 }
             )
+        return rows
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not read executions db: %s", exc)
-    return rows
+    return []
 
 
 def _trade_history(session) -> list[dict[str, Any]]:
@@ -494,11 +519,29 @@ def _screener_rows(runtime: TradingSystemRuntime, session) -> list[dict[str, Any
 
     rows: list[dict[str, Any]] = []
     for idx, symbol in enumerate(sorted(set(symbols))):
-        seed = sum(ord(ch) for ch in symbol)
-        base_price = 50.0 + (seed % 1500) / 5.0
-        ltp = runtime.market_data.get_ltp(symbol) if runtime.market_data is not None else 0.0
-        price = float(ltp or base_price)
-        change_pct = round(((seed % 17) - 8) * 0.73, 2)
+        price = 0.0
+        change_pct = 0.0
+        try:
+            from backend.market_data.yfinance_client import fetch_current_price, fetch_ohlcv, compute_technical_indicators
+            import asyncio
+
+            current = fetch_current_price(symbol)
+            if current:
+                price = float(current)
+            # Get recent data for change calculation
+            df = fetch_ohlcv(symbol, "1d", period="5d")
+            if df is not None and len(df) >= 2:
+                prev_close = float(df["close"].iloc[-2])
+                if prev_close > 0:
+                    change_pct = round(((price - prev_close) / prev_close) * 100, 2)
+        except Exception:
+            pass
+
+        if price <= 0:
+            seed = sum(ord(ch) for ch in symbol)
+            price = 50.0 + (seed % 1500) / 5.0
+            change_pct = round(((seed % 17) - 8) * 0.73, 2)
+
         pnl_pct = round(change_pct * 0.8, 2)
         signal = "buy" if change_pct > 2.5 else "sell" if change_pct < -2.5 else "hold"
         rows.append(
@@ -539,6 +582,119 @@ if (shortCond)
 
 
 def _backtest_result(request: BacktestRequest) -> dict[str, Any]:
+    """Run a real backtest using yfinance data with slippage modeling."""
+    try:
+        from backend.market_data.yfinance_client import fetch_ohlcv, compute_technical_indicators
+        import asyncio
+
+        df = fetch_ohlcv(request.symbol, request.timeframe, period="1y")
+        if df is None or df.empty:
+            return _synthetic_backtest(request)
+
+        df = compute_technical_indicators(df)
+        if df is None or df.empty or "ema_fast" not in df.columns:
+            return _synthetic_backtest(request)
+
+        return _run_real_backtest(df, request)
+    except Exception as exc:
+        logger.warning("Real backtest failed, falling back to synthetic: %s", exc)
+        return _synthetic_backtest(request)
+
+
+def _run_real_backtest(df: Any, request: BacktestRequest) -> dict[str, Any]:
+    """Run backtest on real OHLCV data with EMA crossover strategy and slippage."""
+    import pandas as pd
+
+    capital = float(request.capital)
+    slippage_pct = 0.001  # 0.1% slippage per trade
+    commission_per_trade = 20.0  # Flat brokerage per order
+
+    # Generate signals based on EMA crossover
+    df = df.copy()
+    df["signal"] = 0
+    df.loc[df["ema_fast"] > df["ema_slow"], "signal"] = 1
+    df.loc[df["ema_fast"] < df["ema_slow"], "signal"] = -1
+    df["position"] = df["signal"].shift(1).fillna(0)
+    df["returns"] = df["close"].pct_change() * df["position"]
+
+    # Apply slippage to returns
+    trades = df["position"].diff().fillna(0)
+    trade_mask = trades != 0
+    df.loc[trade_mask, "returns"] -= slippage_pct  # Slippage on entry
+
+    # Calculate equity curve
+    df["equity"] = capital * (1 + df["returns"].fillna(0)).cumprod()
+
+    # Calculate metrics
+    trade_count = int((trades != 0).sum() // 2)
+    returns = df["returns"].dropna()
+
+    if len(returns) == 0 or trade_count == 0:
+        return _synthetic_backtest(request)
+
+    # Deduct commissions
+    total_commissions = trade_count * commission_per_trade
+    net_returns = returns.copy()
+
+    wins = (net_returns > 0).sum()
+    losses = (net_returns < 0).sum()
+    win_rate = round((wins / (wins + losses)) * 100, 2) if (wins + losses) > 0 else 0
+    net_pnl = round(float(net_returns.sum()) * capital - total_commissions, 2)
+    sharpe = round(float(net_returns.mean() / (net_returns.std() + 1e-10)) * (252 ** 0.5), 2)
+    equity = df["equity"].dropna()
+    max_dd = round(float((equity / equity.cummax() - 1).min()) * 100, 2) if len(equity) > 0 else 0
+    gross_profit = float(net_returns[net_returns > 0].sum())
+    gross_loss = abs(float(net_returns[net_returns < 0].sum()))
+    profit_factor = round(gross_profit / (gross_loss + 1e-10), 2)
+
+    # Build equity curve for chart
+    equity_curve = []
+    for idx in range(0, len(equity), max(1, len(equity) // 30)):
+        equity_curve.append({
+            "date": str(equity.index[idx])[:10] if hasattr(equity.index[idx], "strftime") else f"t{idx}",
+            "value": round(float(equity.iloc[idx]), 2),
+        })
+
+    # Build trade list
+    trade_list = []
+    in_trade = False
+    entry_price = 0.0
+    entry_date = ""
+    for idx in range(1, len(df)):
+        pos = df["position"].iloc[idx]
+        prev_pos = df["position"].iloc[idx - 1]
+        if pos == 1 and prev_pos == 0:
+            in_trade = True
+            entry_price = float(df["close"].iloc[idx])
+            entry_date = str(df.index[idx])[:10] if hasattr(df.index[idx], "strftime") else f"t{idx}"
+        elif pos == 0 and prev_pos == 1 and in_trade:
+            in_trade = False
+            exit_price = float(df["close"].iloc[idx])
+            profit = (exit_price - entry_price) - (entry_price * slippage_pct) - (exit_price * slippage_pct) - commission_per_trade
+            trade_list.append({
+                "entry_date": entry_date,
+                "exit_date": str(df.index[idx])[:10] if hasattr(df.index[idx], "strftime") else f"t{idx}",
+                "entry_price": round(entry_price, 2),
+                "profit": round(profit, 2),
+            })
+
+    return {
+        "total_trades": trade_count,
+        "win_rate": win_rate,
+        "profit_factor": profit_factor,
+        "sharpe": sharpe,
+        "max_dd": abs(max_dd),
+        "net_pnl": net_pnl,
+        "equity_curve": equity_curve,
+        "trades": trade_list,
+        "dates": [request.from_date, request.to_date],
+        "slippage_applied": f"{slippage_pct * 100:.1f}%",
+        "commission_per_trade": commission_per_trade,
+    }
+
+
+def _synthetic_backtest(request: BacktestRequest) -> dict[str, Any]:
+    """Fallback synthetic backtest when real data is unavailable."""
     seed = sum(ord(ch) for ch in f"{request.strategy}:{request.symbol}:{request.timeframe}:{request.from_date}:{request.to_date}")
     rng = random.Random(seed)
     equity = float(request.capital)
@@ -565,6 +721,27 @@ def _backtest_result(request: BacktestRequest) -> dict[str, Any]:
                 "entry_price": round(float(request.capital) * (1 + i * 0.01), 2),
                 "profit": round(profit, 2),
             }
+        )
+
+    total_trades = len(trades)
+    win_rate = round((wins / total_trades) * 100.0, 2) if total_trades else 0.0
+    gross_profit = sum(t["profit"] for t in trades if t["profit"] > 0)
+    gross_loss = abs(sum(t["profit"] for t in trades if t["profit"] < 0)) or 1.0
+    profit_factor = round(gross_profit / gross_loss, 2)
+    sharpe = round((total_profit / float(request.capital)) * 10.0, 2)
+    max_dd = round(abs(min((point["value"] for point in equity_curve), default=request.capital) - request.capital), 2)
+    net_pnl = round(total_profit, 2)
+    return {
+        "total_trades": total_trades,
+        "win_rate": win_rate,
+        "profit_factor": profit_factor,
+        "sharpe": sharpe,
+        "max_dd": max_dd,
+        "net_pnl": net_pnl,
+        "equity_curve": equity_curve,
+        "trades": trades,
+        "dates": dates,
+    }
         )
 
     total_trades = len(trades)
@@ -873,6 +1050,53 @@ async def lifespan(app: FastAPI):
     app.state.execution_recovery = execution_recovery
     app.state.supervisor = supervisor
 
+    # Initialize strategy rules engine
+    strategy_engine = StrategyEngine(event_bus)
+    session = SessionLocal()
+    try:
+        db_strategies = session.query(Strategy).all()
+        strategy_engine.load_strategies([{
+            "id": s.id, "name": s.name, "symbol": s.symbol,
+            "timeframe": s.timeframe, "status": s.status,
+            "entry_rule": s.entry_rule, "exit_rule": s.exit_rule,
+        } for s in db_strategies])
+    finally:
+        session.close()
+    app.state.strategy_engine = strategy_engine
+
+    # Subscribe strategy engine to market ticks
+    async def _evaluate_strategies_on_tick(payload: dict[str, Any]) -> None:
+        try:
+            symbol = str(payload.get("symbol") or "").upper()
+            ltp = float(payload.get("ltp") or 0.0)
+            if not symbol or ltp <= 0:
+                return
+            # Compute basic indicators from price (full indicators require OHLCV data)
+            indicators = {"close": ltp, "price": ltp}
+            # Load technical indicators from yfinance cache if available
+            try:
+                from backend.market_data.yfinance_client import fetch_ohlcv, compute_technical_indicators
+                df = await asyncio.to_thread(fetch_ohlcv, symbol, "1d", period="3mo")
+                if df is not None and not df.empty:
+                    df = compute_technical_indicators(df)
+                    if df is not None and not df.empty:
+                        latest = df.iloc[-1]
+                        indicators.update({
+                            "rsi": float(latest.get("rsi", 50)),
+                            "macd": float(latest.get("macd", 0)),
+                            "ema_fast": float(latest.get("ema_fast", 0)),
+                            "ema_slow": float(latest.get("ema_slow", 0)),
+                            "bb_upper": float(latest.get("bb_upper", 0)),
+                            "bb_lower": float(latest.get("bb_lower", 0)),
+                        })
+            except Exception:
+                pass
+            await strategy_engine.evaluate(symbol, ltp, indicators)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Strategy eval on tick failed: %s", exc)
+
+    event_bus.subscribe("market.tick", _evaluate_strategies_on_tick)
+
     try:
         # Recover open executions from previous run
         open_executions = execution_recovery.load_open_executions()
@@ -954,9 +1178,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Trading Dashboard", version="1.0.0", lifespan=lifespan)
 
+_cors_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+if not _cors_origins:
+    _cors_origins = ["http://127.0.0.1:5173", "http://localhost:5173"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1120,7 +1348,7 @@ async def agent_status(request: Request) -> list[dict[str, Any]]:
 
 
 @app.get("/settings")
-async def get_settings() -> dict[str, Any]:
+async def get_settings(user: dict = Depends(require_admin)) -> dict[str, Any]:  # noqa: B008
     """Return dashboard settings for the UI."""
     session = SessionLocal()
     try:
@@ -1132,7 +1360,7 @@ async def get_settings() -> dict[str, Any]:
 
 
 @app.post("/settings")
-async def save_settings(payload: SettingsPayload) -> dict[str, Any]:
+async def save_settings(payload: SettingsPayload, user: dict = Depends(require_admin)) -> dict[str, Any]:  # noqa: B008
     """Persist dashboard settings and update live environment variables."""
     session = SessionLocal()
     try:
@@ -1145,19 +1373,19 @@ async def save_settings(payload: SettingsPayload) -> dict[str, Any]:
                 enable_trading()
             else:
                 disable_trading()
-        return await get_settings()
+        return await get_settings(user=user)
     finally:
         session.close()
 
 
 @app.get("/api/kill-switch")
-async def get_kill_switch() -> dict[str, Any]:
+async def get_kill_switch(user: dict = Depends(verify_token)) -> dict[str, Any]:  # noqa: B008
     """Return whether live trading is currently enabled."""
     return {"trading_enabled": is_trading_enabled()}
 
 
 @app.post("/api/kill-switch")
-async def set_kill_switch(payload: dict[str, Any]) -> dict[str, Any]:
+async def set_kill_switch(payload: dict[str, Any], user: dict = Depends(require_admin)) -> dict[str, Any]:  # noqa: B008
     """Toggle the live-trading kill switch."""
     enabled = bool(payload.get("enabled"))
     session = SessionLocal()
@@ -1272,7 +1500,7 @@ async def get_watchlist() -> list[dict[str, Any]]:
 
 
 @app.post("/api/watchlist/add")
-async def add_watchlist(payload: WatchlistPayload, request: Request) -> dict[str, Any]:
+async def add_watchlist(payload: WatchlistPayload, request: Request, user: dict = Depends(verify_token)) -> dict[str, Any]:  # noqa: B008
     """Add or update one watchlist symbol."""
     symbol = _normalize_symbol(payload.symbol)
     if not symbol:
@@ -1299,7 +1527,7 @@ async def add_watchlist(payload: WatchlistPayload, request: Request) -> dict[str
 
 
 @app.post("/api/watchlist/remove")
-async def remove_watchlist(payload: dict[str, Any], request: Request) -> dict[str, Any]:
+async def remove_watchlist(payload: dict[str, Any], request: Request, user: dict = Depends(verify_token)) -> dict[str, Any]:  # noqa: B008
     """Mark a watchlist symbol as removed."""
     symbol = _normalize_symbol(str(payload.get("symbol") or ""))
     if not symbol:
@@ -1354,7 +1582,7 @@ async def approved_signals() -> list[dict[str, Any]]:
 
 
 @app.post("/api/signal/approve")
-async def approve_signal(payload: SignalActionPayload) -> dict[str, Any]:
+async def approve_signal(payload: SignalActionPayload, user: dict = Depends(verify_token)) -> dict[str, Any]:  # noqa: B008
     """Mark a signal as approved."""
     session = SessionLocal()
     try:
@@ -1371,7 +1599,7 @@ async def approve_signal(payload: SignalActionPayload) -> dict[str, Any]:
 
 
 @app.post("/api/signal/skip")
-async def skip_signal(payload: SignalActionPayload) -> dict[str, Any]:
+async def skip_signal(payload: SignalActionPayload, user: dict = Depends(verify_token)) -> dict[str, Any]:  # noqa: B008
     """Mark a signal as skipped."""
     session = SessionLocal()
     try:
@@ -1409,7 +1637,7 @@ async def patch_signal(signal_id: str, payload: SignalPatchPayload) -> dict[str,
 
 
 @app.post("/alerts/buy-signal")
-async def buy_signal(payload: dict[str, Any], request: Request) -> dict[str, Any]:
+async def buy_signal(payload: dict[str, Any], request: Request, user: dict = Depends(verify_token_or_service)) -> dict[str, Any]:  # noqa: B008
     """Create a pending signal and send the Telegram approval card."""
     symbol = _normalize_symbol(str(payload.get("symbol") or ""))
     if not symbol:
@@ -1510,7 +1738,7 @@ async def positions(request: Request) -> list[dict[str, Any]]:
 
 
 @app.delete("/positions/{symbol}")
-async def close_position(symbol: str, request: Request) -> dict[str, Any]:
+async def close_position(symbol: str, request: Request, user: dict = Depends(verify_token)) -> dict[str, Any]:  # noqa: B008
     """Close a local position by sending the opposite order through the broker adapter."""
     runtime = _runtime(request)
     sym = _normalize_symbol(symbol)
@@ -1560,7 +1788,7 @@ async def close_position(symbol: str, request: Request) -> dict[str, Any]:
 
 
 @app.post("/trade")
-async def trade(request_payload: TradeRequest, request: Request) -> dict[str, Any]:
+async def trade(request_payload: TradeRequest, request: Request, user: dict = Depends(verify_token)) -> dict[str, Any]:  # noqa: B008
     """Place a manual order from the trading page."""
     runtime = _runtime(request)
     if request_payload.mode.lower() == "live" and not is_trading_enabled():
@@ -1649,7 +1877,7 @@ async def strategies() -> list[dict[str, Any]]:
 
 
 @app.post("/strategy/create")
-async def create_strategy(payload: dict[str, Any]) -> dict[str, Any]:
+async def create_strategy(payload: dict[str, Any], user: dict = Depends(require_admin)) -> dict[str, Any]:  # noqa: B008
     """Create a strategy entry from the UI form."""
     session = SessionLocal()
     try:
@@ -1672,7 +1900,7 @@ async def create_strategy(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.delete("/strategy/{strategy_id}")
-async def delete_strategy(strategy_id: str) -> dict[str, Any]:
+async def delete_strategy(strategy_id: str, user: dict = Depends(require_admin)) -> dict[str, Any]:  # noqa: B008
     """Delete a strategy row."""
     session = SessionLocal()
     try:
@@ -1681,7 +1909,70 @@ async def delete_strategy(strategy_id: str) -> dict[str, Any]:
             raise HTTPException(status_code=404, detail="Strategy not found")
         session.delete(row)
         session.commit()
+        # Reload strategy engine
+        strategy_engine = getattr(app.state, "strategy_engine", None)
+        if strategy_engine:
+            all_strats = session.query(Strategy).all()
+            strategy_engine.load_strategies([{
+                "id": s.id, "name": s.name, "symbol": s.symbol,
+                "timeframe": s.timeframe, "status": s.status,
+                "entry_rule": s.entry_rule, "exit_rule": s.exit_rule,
+            } for s in all_strats])
         return {"ok": True}
+    finally:
+        session.close()
+
+
+@app.put("/strategy/{strategy_id}")
+async def edit_strategy(strategy_id: str, payload: dict[str, Any], user: dict = Depends(require_admin)) -> dict[str, Any]:  # noqa: B008
+    """Update an existing strategy."""
+    session = SessionLocal()
+    try:
+        row = session.query(Strategy).filter(Strategy.id == strategy_id).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        if "name" in payload:
+            row.name = str(payload["name"])
+        if "symbol" in payload:
+            row.symbol = str(payload["symbol"]).upper()
+        if "timeframe" in payload:
+            row.timeframe = str(payload["timeframe"])
+        if "status" in payload:
+            row.status = str(payload["status"])
+        if "entry_rule" in payload:
+            row.entry_rule = str(payload["entry_rule"])
+        if "exit_rule" in payload:
+            row.exit_rule = str(payload["exit_rule"])
+        session.commit()
+        # Reload strategy engine
+        strategy_engine = getattr(app.state, "strategy_engine", None)
+        if strategy_engine:
+            all_strats = session.query(Strategy).all()
+            strategy_engine.load_strategies([{
+                "id": s.id, "name": s.name, "symbol": s.symbol,
+                "timeframe": s.timeframe, "status": s.status,
+                "entry_rule": s.entry_rule, "exit_rule": s.exit_rule,
+            } for s in all_strats])
+        return {"ok": True, "id": strategy_id}
+    finally:
+        session.close()
+
+
+@app.post("/strategy/{strategy_id}/reload")
+async def reload_strategy_engine(strategy_id: str, user: dict = Depends(require_admin)) -> dict[str, Any]:  # noqa: B008
+    """Force-reload all strategies into the rules engine."""
+    strategy_engine = getattr(app.state, "strategy_engine", None)
+    if not strategy_engine:
+        raise HTTPException(status_code=503, detail="Strategy engine not ready")
+    session = SessionLocal()
+    try:
+        all_strats = session.query(Strategy).all()
+        strategy_engine.load_strategies([{
+            "id": s.id, "name": s.name, "symbol": s.symbol,
+            "timeframe": s.timeframe, "status": s.status,
+            "entry_rule": s.entry_rule, "exit_rule": s.exit_rule,
+        } for s in all_strats])
+        return {"ok": True, "loaded": len(strategy_engine._strategies)}
     finally:
         session.close()
 

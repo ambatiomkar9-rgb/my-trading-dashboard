@@ -1,37 +1,33 @@
+"""PostgreSQL-backed encrypted broker token store."""
 from __future__ import annotations
 
 import os
-import sqlite3
 import time
-from pathlib import Path
 
 from cryptography.fernet import Fernet
 
-DB_PATH = Path(os.getenv("BROKER_TOKEN_DB_PATH", "data/broker_tokens.db"))
-KEY_PATH = Path(os.getenv("BROKER_TOKEN_KEY_PATH", "data/.token_key"))
+KEY_PATH = os.getenv("BROKER_TOKEN_KEY_PATH", ".token_key")
 
 
 class TokenStore:
     """
-    Encrypted token store using Fernet.
+    Encrypted token store using Fernet + PostgreSQL.
 
-    Notes:
-    - This encrypts tokens at rest. The encryption key is stored on disk (KEY_PATH).
-      For production, prefer storing KEY_PATH on a persistent disk and protect it
-      with OS permissions / secret management.
-    - SQLite is used for simplicity. If you run multiple workers, use a real DB.
+    Tokens are encrypted at rest. The encryption key is stored on disk
+    or loaded from the BROKER_TOKEN_KEY environment variable.
     """
 
     def __init__(self):
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-        if KEY_PATH.exists():
-            self._key = KEY_PATH.read_bytes()
+        key_env = os.getenv("BROKER_TOKEN_KEY", "").strip()
+        if key_env:
+            self._key = key_env.encode("utf-8") if isinstance(key_env, str) else key_env
+        elif os.path.exists(KEY_PATH):
+            self._key = open(KEY_PATH, "rb").read().strip()
         else:
             self._key = Fernet.generate_key()
-            KEY_PATH.write_bytes(self._key)
             try:
+                with open(KEY_PATH, "wb") as f:
+                    f.write(self._key)
                 os.chmod(KEY_PATH, 0o600)
             except Exception:
                 pass
@@ -39,26 +35,21 @@ class TokenStore:
         self._cipher = Fernet(self._key)
         self._init_db()
 
-    def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(str(DB_PATH))
-
     def _init_db(self):
-        con = self._connect()
-        try:
-            con.execute(
-                """
+        from backend.database import engine
+        from sqlalchemy import text
+
+        with engine.connect() as conn:
+            conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS broker_tokens (
-                    broker      TEXT PRIMARY KEY,
+                    broker      VARCHAR(50) PRIMARY KEY,
                     access_enc  TEXT NOT NULL,
                     refresh_enc TEXT NOT NULL,
-                    expires_at  INTEGER NOT NULL,
-                    updated_at  INTEGER NOT NULL
+                    expires_at  BIGINT NOT NULL,
+                    updated_at  BIGINT NOT NULL
                 )
-                """
-            )
-            con.commit()
-        finally:
-            con.close()
+            """))
+            conn.commit()
 
     def save(self, broker: str, access_token: str, refresh_token: str, expires_in: int = 86400):
         broker = (broker or "").strip().lower()
@@ -71,37 +62,44 @@ class TokenStore:
         enc_r = self._cipher.encrypt((refresh_token or "").encode("utf-8")).decode("utf-8")
         now = int(time.time())
 
-        con = self._connect()
-        try:
-            con.execute(
-                """
-                INSERT INTO broker_tokens (broker, access_enc, refresh_enc, expires_at, updated_at)
-                VALUES (?,?,?,?,?)
-                ON CONFLICT(broker) DO UPDATE SET
-                    access_enc=excluded.access_enc,
-                    refresh_enc=excluded.refresh_enc,
-                    expires_at=excluded.expires_at,
-                    updated_at=excluded.updated_at
-                """,
-                (broker, enc_a, enc_r, now + int(expires_in or 0), now),
+        from backend.database import engine
+        from sqlalchemy import text
+
+        with engine.connect() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO broker_tokens (broker, access_enc, refresh_enc, expires_at, updated_at)
+                    VALUES (:broker, :access_enc, :refresh_enc, :expires_at, :updated_at)
+                    ON CONFLICT (broker) DO UPDATE SET
+                        access_enc=EXCLUDED.access_enc,
+                        refresh_enc=EXCLUDED.refresh_enc,
+                        expires_at=EXCLUDED.expires_at,
+                        updated_at=EXCLUDED.updated_at
+                """),
+                {
+                    "broker": broker,
+                    "access_enc": enc_a,
+                    "refresh_enc": enc_r,
+                    "expires_at": now + int(expires_in or 0),
+                    "updated_at": now,
+                },
             )
-            con.commit()
-        finally:
-            con.close()
+            conn.commit()
 
     def get(self, broker: str) -> dict | None:
         broker = (broker or "").strip().lower()
         if not broker:
             return None
 
-        con = self._connect()
-        try:
-            row = con.execute(
-                "SELECT access_enc, refresh_enc, expires_at FROM broker_tokens WHERE broker=?",
-                (broker,),
-            ).fetchone()
-        finally:
-            con.close()
+        from backend.database import engine
+        from sqlalchemy import text
+
+        with engine.connect() as conn:
+            result = conn.execute(
+                text("SELECT access_enc, refresh_enc, expires_at FROM broker_tokens WHERE broker = :broker"),
+                {"broker": broker},
+            )
+            row = result.fetchone()
 
         if not row:
             return None
@@ -122,10 +120,10 @@ class TokenStore:
         broker = (broker or "").strip().lower()
         if not broker:
             return
-        con = self._connect()
-        try:
-            con.execute("DELETE FROM broker_tokens WHERE broker=?", (broker,))
-            con.commit()
-        finally:
-            con.close()
 
+        from backend.database import engine
+        from sqlalchemy import text
+
+        with engine.connect() as conn:
+            conn.execute(text("DELETE FROM broker_tokens WHERE broker = :broker"), {"broker": broker})
+            conn.commit()

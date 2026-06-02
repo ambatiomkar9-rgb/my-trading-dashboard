@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { api } from '../api';
 
 const API_URL = '';
 
@@ -78,39 +79,27 @@ export function TradingPage() {
     }
 
     try {
-      const response = await fetch(`${API_URL}/trade`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          symbol: formData.symbol,
-          side: formData.side,
-          quantity: parseFloat(formData.qty),
-          price: parseFloat(formData.price),
-          stop_loss: formData.stopLoss ? parseFloat(formData.stopLoss) : null,
-          take_profit: formData.takeProfit ? parseFloat(formData.takeProfit) : null,
-          mode,
-        }),
+      const data = await api.post('/trade', {
+        symbol: formData.symbol,
+        side: formData.side,
+        quantity: parseFloat(formData.qty),
+        price: parseFloat(formData.price),
+        stop_loss: formData.stopLoss ? parseFloat(formData.stopLoss) : null,
+        take_profit: formData.takeProfit ? parseFloat(formData.takeProfit) : null,
+        mode,
       });
-
-      if (response.ok) {
-        setFormData({ symbol: '', side: 'buy', qty: '', price: '', stopLoss: '', takeProfit: '' });
-        await Promise.all([fetchPositions(), fetchOrders()]);
-      } else {
-        const data = await safeJson(response);
-        alert(data?.detail || data?.raw || 'Error placing order');
-      }
-    } catch (error) {
+      setFormData({ symbol: '', side: 'buy', qty: '', price: '', stopLoss: '', takeProfit: '' });
+      await Promise.all([fetchPositions(), fetchOrders()]);
+    } catch (error: any) {
       console.error('Error placing order:', error);
-      alert('Error placing order');
+      alert(error?.message || 'Error placing order');
     }
   };
 
   const handleClosePosition = async (symbol: string) => {
     try {
-      const res = await fetch(`${API_URL}/positions/${encodeURIComponent(symbol)}`, { method: 'DELETE' });
-      if (res.ok) {
-        await fetchPositions();
-      }
+      await api.delete(`/positions/${encodeURIComponent(symbol)}`);
+      await fetchPositions();
     } catch (error) {
       console.error('Error closing position:', error);
     }

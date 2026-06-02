@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 from fastapi import Depends, HTTPException
@@ -66,4 +67,29 @@ async def require_admin(user: dict = Depends(verify_token)) -> dict:
     if str(user.get("role") or "") != "admin":
         raise HTTPException(status_code=403, detail="Admin role required")
     return user
+
+
+async def verify_token_or_service(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> dict:
+    """Verify a JWT or accept DASHBOARD_API_TOKEN as a service bearer token."""
+    try:
+        if not credentials:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        # Try JWT first
+        payload = decode_token(credentials.credentials)
+        if payload:
+            return {"username": payload.get("sub", ""), "role": payload.get("role", "user")}
+        # Fall back to service token
+        service_token = os.getenv("DASHBOARD_API_TOKEN", "").strip()
+        if service_token and credentials.credentials == service_token:
+            return {"username": "service", "role": "admin"}
+        admin_key = os.getenv("ADMIN_API_KEY", "").strip()
+        if admin_key and credentials.credentials == admin_key:
+            return {"username": "service", "role": "admin"}
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
 

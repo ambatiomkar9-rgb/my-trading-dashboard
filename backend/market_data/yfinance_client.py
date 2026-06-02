@@ -203,7 +203,8 @@ def compute_technical_indicators(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     """
     Compute technical indicators on OHLCV data.
 
-    Adds: ema_fast, ema_slow, rsi, macd, macd_signal, sma_20, bb_upper, bb_lower
+    Adds: ema_fast, ema_slow, rsi, macd, macd_signal, sma_20, bb_upper, bb_lower,
+          stochastic_k, stochastic_d, atr
     """
     if df is None or df.empty or "close" not in df.columns:
         return None
@@ -234,5 +235,18 @@ def compute_technical_indicators(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     avg_loss = loss.rolling(window=14).mean()
     rs = avg_gain / (avg_loss + 1e-10)
     df["rsi"] = 100 - (100 / (1 + rs))
+
+    # Stochastic Oscillator (14, 3, 3)
+    low_14 = df["low"].rolling(window=14).min()
+    high_14 = df["high"].rolling(window=14).max()
+    df["stochastic_k"] = 100 * (df["close"] - low_14) / (high_14 - low_14 + 1e-10)
+    df["stochastic_d"] = df["stochastic_k"].rolling(window=3).mean()
+
+    # ATR (14-period)
+    high_low = df["high"] - df["low"]
+    high_close = (df["high"] - df["close"].shift()).abs()
+    low_close = (df["low"] - df["close"].shift()).abs()
+    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    df["atr"] = true_range.rolling(window=14).mean()
 
     return df

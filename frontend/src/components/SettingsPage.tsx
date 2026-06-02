@@ -57,15 +57,13 @@ export function SettingsPage() {
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch(`${API_URL}/settings`);
-        const data = await safeJson(res);
-        if (res.ok && data && typeof data === 'object') {
+        const data = await api.get('/settings');
+        if (data && typeof data === 'object') {
           setSettings((prev) => ({ ...prev, ...data }));
         }
 
-        const ks = await fetch(`${API_URL}/api/kill-switch`);
-        const ksData = await safeJson(ks);
-        if (ks.ok && typeof ksData?.trading_enabled === 'boolean') {
+        const ksData = await api.get('/api/kill-switch');
+        if (typeof ksData?.trading_enabled === 'boolean') {
           setKillEnabled(ksData.trading_enabled);
         }
       } catch {
@@ -90,18 +88,7 @@ export function SettingsPage() {
   const toggleKillSwitch = async (enabled: boolean) => {
     setKillBusy(true);
     try {
-      const res = await fetch(`${API_URL}/api/kill-switch`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...authHeaders(),
-        },
-        body: JSON.stringify({ enabled }),
-      });
-      const data = await safeJson(res);
-      if (!res.ok) {
-        throw new Error(String(data?.detail || data?.raw || `HTTP ${res.status}`));
-      }
+      const data = await api.post('/api/kill-switch', { enabled });
       setKillEnabled(Boolean(data?.trading_enabled));
     } catch (error) {
       console.error('Kill switch update failed:', error);
@@ -113,15 +100,7 @@ export function SettingsPage() {
 
   const handleSave = async () => {
     try {
-      const res = await fetch(`${API_URL}/settings`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settings),
-      });
-      if (!res.ok) {
-        const data = await safeJson(res);
-        throw new Error(String(data?.detail || data?.raw || `HTTP ${res.status}`));
-      }
+      await api.post('/settings', settings);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (error) {
@@ -146,12 +125,7 @@ export function SettingsPage() {
 
   const handleTelegramTest = async () => {
     try {
-      const res = await fetch(`${API_URL}/alerts/buy-signal`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol: 'TEST', signal: 'buy' }),
-      });
-      const data = await safeJson(res);
+      const data = await api.post('/alerts/buy-signal', { symbol: 'TEST', signal: 'buy' });
       alert(`Telegram test: ${data?.status || 'unknown'}`);
     } catch {
       alert('Telegram test failed');

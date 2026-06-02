@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { api } from '../api';
 
 const API_URL = '';
 
@@ -113,7 +114,7 @@ export function StrategiesPage() {
     // eslint-disable-next-line no-restricted-globals
     if (!confirm('Delete this strategy?')) return;
     try {
-      await fetch(`${API_URL}/strategy/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      await api.delete(`/strategy/${encodeURIComponent(id)}`);
       await fetchStrategies();
       setSelected(null);
     } catch (error) {
@@ -131,20 +132,14 @@ export function StrategiesPage() {
     }
     setCreating(true);
     try {
-      const res = await fetch(`${API_URL}/strategy/create`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name,
-          symbol,
-          timeframe: newStrategy.timeframe,
-          status: newStrategy.status,
-          entry_rule: newStrategy.entry_rule,
-          exit_rule: newStrategy.exit_rule,
-        }),
+      await api.post('/strategy/create', {
+        name,
+        symbol,
+        timeframe: newStrategy.timeframe,
+        status: newStrategy.status,
+        entry_rule: newStrategy.entry_rule,
+        exit_rule: newStrategy.exit_rule,
       });
-      const data = await safeJson(res);
-      if (!res.ok) throw new Error(String(data?.detail || data?.raw || `HTTP ${res.status}`));
       setShowNewForm(false);
       setNewStrategy({ name: '', symbol: 'INFY', timeframe: '4h', status: 'paused', entry_rule: '', exit_rule: '' });
       await fetchStrategies();
