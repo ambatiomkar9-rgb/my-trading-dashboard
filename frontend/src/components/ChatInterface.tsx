@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
-
-const API_URL = '';
+import { apiFetch } from '../api';
 
 export function ChatInterface() {
   const [message, setMessage] = useState('');
@@ -19,8 +18,7 @@ export function ChatInterface() {
   const pollResponse = async (commandId: string, attempts = 240): Promise<string> => {
     for (let i = 0; i < attempts; i += 1) {
       try {
-        const res = await fetch(`${API_URL}/chat/response/${commandId}`);
-        const data = await safeJson(res);
+        const data = await apiFetch(`/chat/response/${commandId}`);
         if (data.status === 'done' && data.response) return data.response;
       } catch {
         // transient poll failure
@@ -38,13 +36,13 @@ export function ChatInterface() {
     setHistory((p) => [...p, { role: 'user', content: userMessage }, { role: 'assistant', content: 'Agent Processing...' }]);
 
     try {
-      const res = await fetch(`${API_URL}/chat`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: userMessage }),
+      const data = await apiFetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: userMessage }),
       });
-      const data = await safeJson(res);
-      if (!res.ok || !data.command_id) {
-        const detail = data?.detail || data?.raw || `HTTP ${res.status}`;
-        throw new Error(String(detail));
+      if (!data.command_id) {
+        throw new Error(data?.detail || 'No command_id returned');
       }
       const ans = await pollResponse(data.command_id);
       setHistory((p) => {
@@ -64,37 +62,33 @@ export function ChatInterface() {
   };
 
   return (
-    <div className="p-6 bg-black text-white">
-      <h1 className="text-3xl font-bold mb-6">Chat</h1>
-      <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-4 min-h-[320px]">
-        {history.length === 0 ? (
-          <div className="text-gray-400 text-sm">Type a message to send it to the Boss Agent.</div>
-        ) : null}
-        <div className="space-y-3">
-          {history.map((m, i) => (
-            <div key={i} className="text-sm">
-              <div className={`font-semibold ${m.role === 'user' ? 'text-blue-300' : 'text-green-300'}`}>
-                {m.role === 'user' ? 'You' : 'Agent'}
-              </div>
-              <div className="text-gray-100 whitespace-pre-wrap">{m.content}</div>
-            </div>
-          ))}
-        </div>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <h2 style={{ margin: '0 0 12px' }}>Chat</h2>
+      <div style={{ flex: 1, overflowY: 'auto', padding: 8, background: '#111', borderRadius: 8 }}>
+        {history.map((m, i) => (
+          <div key={i} style={{ marginBottom: 8 }}>
+            <strong style={{ color: m.role === 'user' ? '#60a5fa' : '#4ade80' }}>
+              {m.role === 'user' ? 'You' : 'Agent'}
+            </strong>
+            <div style={{ color: '#e5e7eb', whiteSpace: 'pre-wrap' }}>{m.content}</div>
+          </div>
+        ))}
       </div>
-      <div className="flex gap-2">
+      <div style={{ display: 'flex', marginTop: 8, gap: 8 }}>
         <input
-          className="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white"
           value={message}
           onChange={(e) => setMessage(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && !loading && sendMessage()}
           placeholder="Ask: analyze INFY, backtest BTC, generate PineScript strategy..."
+          style={{ flex: 1, padding: 10, borderRadius: 8, border: '1px solid #333', background: '#1a1a2e', color: '#fff' }}
+          disabled={loading}
         />
         <button
           onClick={sendMessage}
-          disabled={loading}
-          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 rounded font-semibold"
+          disabled={loading || !message.trim()}
+          style={{ padding: '10px 20px', borderRadius: 8, background: '#2563eb', color: '#fff', border: 'none', cursor: 'pointer' }}
         >
-          {loading ? 'Sending...' : 'Send'}
+          Send
         </button>
       </div>
     </div>
