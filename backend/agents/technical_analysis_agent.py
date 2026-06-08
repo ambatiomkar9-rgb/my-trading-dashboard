@@ -12,10 +12,10 @@ from typing import Any, Optional
 
 try:
     from backend.database import SessionLocal, TradeSignal, WatchlistStock  # type: ignore
-    from backend.notifications.telegram_bot import send_approval_request  # type: ignore
+    from backend.notifications.telegram_bot import send_approval_request, send_message  # type: ignore
 except ModuleNotFoundError:  # noqa: BLE001
     from database import SessionLocal, TradeSignal, WatchlistStock  # type: ignore
-    from notifications.telegram_bot import send_approval_request  # type: ignore
+    from notifications.telegram_bot import send_approval_request, send_message  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +174,7 @@ class TechnicalAnalysisAgent:
                 watch = session.query(WatchlistStock).filter(WatchlistStock.symbol == symbol).first()
                 quantity = int(getattr(watch, "quantity_to_buy", 1) or 1) if watch else 1
                 strategy_id = str(getattr(watch, "strategy_id", "default") or "default") if watch else "default"
+                auto_trade = bool(getattr(watch, "auto_trade", False)) if watch else False
 
                 signal_id = uuid.uuid4().hex
                 row = TradeSignal(
@@ -188,7 +189,7 @@ class TechnicalAnalysisAgent:
                     fundamental_score=0.0,
                     risk_score=0.0,
                     overall_score=float(technical_score),
-                    approval_status="pending",
+                    approval_status="approved" if auto_trade else "pending",
                     approval_reason=reason,
                 )
                 session.add(row)
@@ -229,7 +230,7 @@ class TechnicalAnalysisAgent:
                 "overall_score": round(float(technical_score), 1),
                 "reason": reason,
                 "approval_reason": reason,
-                "approval_status": "pending",
+                "approval_status": "approved" if auto_trade else "pending",
                 "broker": "upstox",
                 "trade_segment": "intraday",
                 "expected_exit": round(float(price) + (2.0 * atr if signal_type == "buy" else -2.0 * atr), 2),
@@ -241,8 +242,19 @@ class TechnicalAnalysisAgent:
                 await self._bus.publish("signal.created", payload)
 
             if os.getenv("TELEGRAM_BOT_TOKEN", "").strip() and os.getenv("TELEGRAM_CHAT_ID", "").strip():
-                await send_approval_request(payload)
+                if auto_trade:
+                    side_upper = signal_type.upper()
+                    await send_message(
+                        f"*AUTO-EXECUTING {side_upper} {symbol}*\n"
+                        f"Price: Rs {price:.2f}\n"
+                        f"Qty: {quantity}\n"
+                        f"Score: {technical_score:.1f}/100\n"
+                        f"Reason: {reason}\n"
+                        f"Executing automatically per your strategy..."
+                    )
+                else:
+                    await send_approval_request(payload)
 
-            logger.info("Technical signal created: %s %s @ %.2f", signal_type.upper(), symbol, price)
+            logger.info("Technical signal created: %s %s @ %.2f (auto_trade=%s)", signal_type.upper(), symbol, price, auto_trade)
         except Exception as exc:  # noqa: BLE001
             logger.error("Signal creation failed for %s: %s", symbol, exc)

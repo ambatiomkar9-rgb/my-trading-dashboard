@@ -14,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from backend.database import Base, SessionLocal
 
 logger = logging.getLogger(__name__)
-PBKDF2_ITERS = int(os.getenv("PASSWORD_HASH_ITERATIONS", "210000"))
+PBKDF2_ITERS = 210000
 
 
 class User(Base):
@@ -126,14 +126,17 @@ def ensure_default_admin() -> None:
     try:
         count = session.query(User).count()
         if count == 0:
-            admin_pw = os.getenv("ADMIN_PASSWORD", "change-me-now")
-            session.close()
+            admin_pw = os.getenv("ADMIN_PASSWORD", "").strip()
+            if not admin_pw:
+                admin_pw = secrets.token_urlsafe(16)
+                logger.warning(
+                    "No ADMIN_PASSWORD set — generated random password: %s. "
+                    "Set ADMIN_PASSWORD env var to use a known password.",
+                    admin_pw,
+                )
             if create_user("admin", admin_pw, "admin"):
-                logger.warning("Default admin created. Set ADMIN_PASSWORD env var to change it.")
+                logger.warning("Default admin account created.")
     except Exception as exc:
         logger.error("ensure_default_admin failed: %s", exc)
     finally:
-        try:
-            session.close()
-        except Exception:
-            pass
+        session.close()

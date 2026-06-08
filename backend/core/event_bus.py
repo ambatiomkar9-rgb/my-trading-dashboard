@@ -51,15 +51,21 @@ class AsyncEventBus:
                 return
 
             if self._event_store is not None:
-                try:
-                    await asyncio.to_thread(
-                        self._event_store.store_event,
-                        name,
-                        payload if isinstance(payload, dict) else {"value": payload},
-                        source=source,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("Failed to persist event %s: %s", name, exc)
+                for attempt in range(3):
+                    try:
+                        await asyncio.to_thread(
+                            self._event_store.store_event,
+                            name,
+                            payload if isinstance(payload, dict) else {"value": payload},
+                            source=source,
+                        )
+                        break
+                    except Exception as exc:  # noqa: BLE001
+                        if attempt < 2:
+                            logger.warning("Event persist attempt %d failed for %s: %s", attempt + 1, name, exc)
+                            await asyncio.sleep(0.5 * (attempt + 1))
+                        else:
+                            logger.error("Event %s lost after 3 attempts: %s", name, exc)
 
             callbacks = list(self._subscribers.get(name, []))
             if not callbacks:

@@ -228,6 +228,8 @@ class TradeExecutionAgent:
             if client_order_id in self._placed:
                 logger.info("Duplicate signal %s skipped", signal_id)
                 return
+            # Reserve immediately to prevent duplicate orders in the same poll cycle
+            self._placed[client_order_id] = "pending"
 
             if side == "sell":
                 buy_price = target
@@ -534,12 +536,12 @@ class TradeExecutionAgent:
             with engine.connect() as conn:
                 if fill_price is not None:
                     conn.execute(
-                        text("UPDATE executions SET status=:status, entry_price=:fill_price WHERE client_order_id=:client_oid"),
+                        text("UPDATE executions SET status=:status, entry_price=:fill_price WHERE client_order_id=:client_oid AND status='submitted'"),
                         {"status": status, "fill_price": float(fill_price), "client_oid": client_oid},
                     )
                 else:
                     conn.execute(
-                        text("UPDATE executions SET status=:status WHERE client_order_id=:client_oid"),
+                        text("UPDATE executions SET status=:status WHERE client_order_id=:client_oid AND status='submitted'"),
                         {"status": status, "client_oid": client_oid},
                     )
                 conn.commit()

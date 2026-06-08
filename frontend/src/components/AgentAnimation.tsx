@@ -19,8 +19,9 @@ export function AgentAnimationView() {
   const [agents, setAgents] = useState<Record<string, AgentCard>>({});
 
   useEffect(() => {
+    const token = localStorage.getItem('access_token') || '';
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${window.location.host}/ws/agent-monitor`);
+    const ws = new WebSocket(`${protocol}//${window.location.host}/ws/agent-monitor?token=${encodeURIComponent(token)}`);
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data) as Partial<AgentCard>;

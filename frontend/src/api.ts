@@ -28,6 +28,9 @@ export function setTokens(tokens: { access_token: string } | null) {
   if (tokens) {
     _state.accessToken = tokens.access_token;
     _state.isAuthenticated = true;
+    // NOTE: localStorage is XSS-vulnerable. httpOnly cookies would be safer
+    // but require backend session management. Acceptable tradeoff for a
+    // single-user local dashboard with short-lived tokens (8h TTL).
     localStorage.setItem('access_token', tokens.access_token);
   } else {
     _state.accessToken = null;

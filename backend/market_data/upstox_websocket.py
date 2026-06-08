@@ -136,5 +136,13 @@ class UpstoxWebSocket:
     @staticmethod
     def _to_key(symbol: str) -> str:
         s = (symbol or "").upper().replace(".NS", "").replace(".BO", "")
+        try:
+            from backend.market_data.symbol_master_service import SymbolMasterService
+            master = SymbolMasterService()
+            key = master.get_instrument_key(s)
+            if key:
+                return key
+        except Exception:  # noqa: BLE001
+            pass
         return f"NSE_EQ|{s}"
 

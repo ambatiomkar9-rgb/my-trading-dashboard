@@ -1,11 +1,12 @@
 """Dashboard JWT helpers and FastAPI authentication dependencies."""
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 from typing import Optional
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 try:
@@ -59,7 +60,7 @@ async def verify_token(
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
+        raise HTTPException(status_code=401, detail="Invalid or expired token") from exc
 
 
 async def require_admin(user: dict = Depends(verify_token)) -> dict:
@@ -80,16 +81,16 @@ async def verify_token_or_service(
         payload = decode_token(credentials.credentials)
         if payload:
             return {"username": payload.get("sub", ""), "role": payload.get("role", "user")}
-        # Fall back to service token
+        # Fall back to service token (constant-time comparison to prevent timing attacks)
         service_token = os.getenv("DASHBOARD_API_TOKEN", "").strip()
-        if service_token and credentials.credentials == service_token:
+        if service_token and hmac.compare_digest(credentials.credentials, service_token):
             return {"username": "service", "role": "admin"}
         admin_key = os.getenv("ADMIN_API_KEY", "").strip()
-        if admin_key and credentials.credentials == admin_key:
+        if admin_key and hmac.compare_digest(credentials.credentials, admin_key):
             return {"username": "service", "role": "admin"}
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
+        raise HTTPException(status_code=401, detail="Invalid or expired token") from exc
 

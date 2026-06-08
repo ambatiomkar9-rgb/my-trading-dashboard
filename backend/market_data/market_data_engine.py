@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional
 
 try:
@@ -22,6 +23,8 @@ class MarketDataEngine:
         self._auth = auth_manager or BrokerAuthManager("upstox")
         self._ws = UpstoxWebSocket(self._auth)
         self._cache: dict[str, dict] = {}
+        self._cache_updated_at: dict[str, float] = {}
+        self._stale_threshold: float = 120.0  # seconds
         self._ws.on_tick(self._on_ticks)
 
     async def start(self) -> None:
@@ -39,20 +42,31 @@ class MarketDataEngine:
         except Exception as exc:  # noqa: BLE001
             logger.error("MarketDataEngine stop failed: %s", exc)
 
-    async def subscribe(self, symbols: list[str], mode: str = "full") -> None:
-        """Subscribe to a list of symbols."""
+    async def subscribe(self, symbols: list[str], mode: str = "full") -> bool:
+        """Subscribe to a list of symbols. Returns True on success."""
         try:
             await self._ws.subscribe(symbols, mode)
+            return True
         except Exception as exc:  # noqa: BLE001
             logger.error("MarketDataEngine subscribe failed: %s", exc)
+            return False
 
     def get_ltp(self, symbol: str) -> float:
-        """Return the latest cached last-traded price."""
-        return float(self._cache.get((symbol or "").upper(), {}).get("ltp", 0.0) or 0.0)
+        """Return the latest cached last-traded price. Returns 0.0 if stale."""
+        sym = (symbol or "").upper()
+        updated_at = self._cache_updated_at.get(sym, 0.0)
+        if updated_at > 0 and (time.time() - updated_at) > self._stale_threshold:
+            logger.warning("Stale price for %s (%.0fs old)", sym, time.time() - updated_at)
+            return 0.0
+        return float(self._cache.get(sym, {}).get("ltp", 0.0) or 0.0)
 
     def get_snapshot(self, symbol: str) -> dict:
-        """Return the full cached tick snapshot."""
-        return dict(self._cache.get((symbol or "").upper(), {}))
+        """Return the full cached tick snapshot. Returns empty dict if stale."""
+        sym = (symbol or "").upper()
+        updated_at = self._cache_updated_at.get(sym, 0.0)
+        if updated_at > 0 and (time.time() - updated_at) > self._stale_threshold:
+            return {}
+        return dict(self._cache.get(sym, {}))
 
     async def _on_ticks(self, ticks: list[dict]) -> None:
         try:
@@ -62,6 +76,7 @@ class MarketDataEngine:
                 if not symbol:
                     continue
                 self._cache[symbol] = tick
+                self._cache_updated_at[symbol] = time.time()
                 await self._bus.publish(
                     "market.tick",
                     {

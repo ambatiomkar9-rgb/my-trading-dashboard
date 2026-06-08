@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timedelta
 from typing import Optional
 
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+# Limit concurrent yfinance HTTP requests to avoid rate limiting
+_yf_semaphore = threading.Semaphore(3)
 
 try:
     import yfinance as yf
@@ -56,7 +60,7 @@ def _get_yf_breaker():
     global _yf_breaker
     if _yf_breaker is None:
         from backend.infra.circuit_breaker import get_breaker
-        _yf_breaker = get_breaker("yfinance", failure_threshold=5, recovery_timeout=60)
+        _yf_breaker = get_breaker("yfinance", failure_threshold=10, recovery_timeout=60)
     return _yf_breaker
 
 
@@ -92,6 +96,7 @@ def fetch_ohlcv(
     yf_symbol = _resolve_symbol(symbol)
     yf_interval = TIMEFRAME_MAP.get(timeframe, "1d")
 
+    _yf_semaphore.acquire()
     try:
         ticker = yf.Ticker(yf_symbol)
 
@@ -139,6 +144,8 @@ def fetch_ohlcv(
         breaker.record_failure()
         logger.error("Failed to fetch OHLCV for %s: %s", yf_symbol, exc)
         return None
+    finally:
+        _yf_semaphore.release()
 
 
 def _aggregate_4h(df: pd.DataFrame) -> pd.DataFrame:

@@ -5,10 +5,23 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _is_market_hours() -> bool:
+    """Check if current time is within Indian market hours (9:15 AM - 3:30 PM IST)."""
+    now = datetime.now(IST)
+    if now.weekday() >= 5:
+        return False
+    market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
+    market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    return market_open <= now <= market_close
 
 
 class ConnectionState(Enum):
@@ -22,6 +35,7 @@ class ConnectionState(Enum):
 class ReconnectManager:
     MAX_DELAY = 60
     MAX_RETRIES = 20
+    DAILY_RETRY_RESET = 86400  # Reset retry counter after 24 hours
 
     def __init__(
         self,
@@ -38,10 +52,39 @@ class ReconnectManager:
         self._ws: Any = None
         self._retries = 0
         self._last_msg_at = 0.0
+        self._last_connected_at: float = 0.0
+        self._last_daily_reset_at: float = 0.0
         self._subscriptions: list[dict[str, Any]] = []
         self._running = False
         self._listen_task: asyncio.Task | None = None
         self._heartbeat_task: asyncio.Task | None = None
+
+    def is_healthy(self) -> bool:
+        """Return True if the connection is alive or recently was."""
+        if self.state in (ConnectionState.CONNECTED, ConnectionState.CONNECTING):
+            return True
+        # Allow a grace period for transient disconnects (max 120s since last good message)
+        if self._last_msg_at > 0 and (time.time() - self._last_msg_at) < 120:
+            return True
+        return False
+
+    def _maybe_daily_reset(self) -> None:
+        """Reset retry counter once per day so overnight disconnects don't block morning reconnection."""
+        now = time.time()
+        if self._last_daily_reset_at == 0:
+            self._last_daily_reset_at = now
+            return
+        if now - self._last_daily_reset_at >= self.DAILY_RETRY_RESET:
+            if self._retries > 0:
+                logger.info(
+                    "Daily retry reset: clearing %d retries (was in state %s)",
+                    self._retries, self.state.value,
+                )
+                self._retries = 0
+                self._last_daily_reset_at = now
+                # If we were FAILED, allow reconnection
+                if self.state == ConnectionState.FAILED:
+                    self.state = ConnectionState.DISCONNECTED
 
     async def connect(self) -> None:
         """Start the reconnect loop. Runs until close() is called."""
@@ -83,6 +126,9 @@ class ReconnectManager:
             raise RuntimeError("Run: pip install websockets>=12.0") from exc
 
         while self._running:
+            # Check daily reset before entering retry logic
+            self._maybe_daily_reset()
+
             self.state = ConnectionState.CONNECTING
             try:
                 headers = await self.get_headers()
@@ -96,6 +142,7 @@ class ReconnectManager:
                 self.state = ConnectionState.CONNECTED
                 self._retries = 0
                 self._last_msg_at = time.time()
+                self._last_connected_at = time.time()
                 logger.info("WebSocket connected")
 
                 await self._resubscribe()
@@ -118,10 +165,16 @@ class ReconnectManager:
                 logger.error("Max retries exceeded. Stopping.")
                 return
 
-            delay = min(2 ** (self._retries - 1), self.MAX_DELAY)
-            self.state = ConnectionState.RECONNECTING
-            logger.info("Reconnecting in %ds (attempt %d)", delay, self._retries)
-            await asyncio.sleep(delay)
+            if _is_market_hours():
+                delay = min(2 ** (self._retries - 1), self.MAX_DELAY)
+                self.state = ConnectionState.RECONNECTING
+                logger.info("Reconnecting in %ds (attempt %d)", delay, self._retries)
+                await asyncio.sleep(delay)
+            else:
+                # After hours: fixed 5-minute delay to avoid burning retries overnight
+                self.state = ConnectionState.RECONNECTING
+                logger.info("After hours: waiting 300s before reconnect (attempt %d)", self._retries)
+                await asyncio.sleep(300)
 
     async def _listen(self) -> None:
         try:

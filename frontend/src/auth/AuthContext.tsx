@@ -37,12 +37,37 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     loadStoredAuth();
     const state = getAuthState();
-    setAuthState((prev) => ({
-      ...prev,
-      isAuthenticated: state.isAuthenticated,
-      username: state.username,
-      loading: false,
-    }));
+
+    if (state.isAuthenticated && state.accessToken) {
+      fetch('/api/kill-switch', {
+        headers: { Authorization: `Bearer ${state.accessToken}` },
+      })
+        .then((r) => {
+          if (r.status === 401) {
+            setTokens(null);
+            state.isAuthenticated = false;
+            state.username = null;
+          }
+        })
+        .catch(() => {
+          // Network error — keep local state, will fail on next API call
+        })
+        .finally(() => {
+          setAuthState((prev) => ({
+            ...prev,
+            isAuthenticated: state.isAuthenticated,
+            username: state.username,
+            loading: false,
+          }));
+        });
+    } else {
+      setAuthState((prev) => ({
+        ...prev,
+        isAuthenticated: state.isAuthenticated,
+        username: state.username,
+        loading: false,
+      }));
+    }
 
     setOnUnauthorized(() => {
       setAuthState((prev) => ({

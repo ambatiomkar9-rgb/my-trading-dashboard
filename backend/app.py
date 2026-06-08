@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import random
+import re
 import sys
 import uuid
 from contextlib import asynccontextmanager
@@ -14,13 +15,14 @@ from pathlib import Path
 from typing import Any, Optional
 
 import httpx
-from fastapi import Depends, FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from backend.auth import create_token, require_admin, verify_token, verify_token_or_service
+from backend.infra.rate_limiter import rate_limit
 from backend.brokerage.charges_engine import ChargesEngine, TradeSegment
 from backend.brokers.upstox_broker import broker_from_env
 from backend.config.trading_config import disable_trading, enable_trading, is_trading_enabled
@@ -36,6 +38,7 @@ from backend.database import (
     Trade,
     TradeSignal,
     WatchlistStock,
+    db_session,
     init_db,
 )
 from backend.execution.auth.broker_auth_manager import BrokerAuthManager
@@ -255,11 +258,8 @@ def _apply_settings_to_env(settings: dict[str, Any]) -> None:
 
 
 def _load_persisted_settings() -> dict[str, Any]:
-    session = SessionLocal()
-    try:
+    with db_session() as session:
         return _settings_as_dict(session)
-    finally:
-        session.close()
 
 
 def _load_trading_mode() -> str:
@@ -793,11 +793,8 @@ async def _build_agent_cards(app: FastAPI) -> list[dict[str, Any]]:
     runtime: TradingSystemRuntime | None = getattr(app.state, "runtime", None)
     snapshot = runtime.status() if runtime is not None else {}
     cfg = load_tooling_config()
-    session = SessionLocal()
-    try:
+    with db_session() as session:
         strategies = session.query(Strategy).order_by(Strategy.name.asc()).all()
-    finally:
-        session.close()
 
     total_strategies, running_strategies = _strategy_summary(strategies)
     boss_task = "Chat assistant ready"
@@ -966,7 +963,7 @@ async def _process_chat_command(app: FastAPI, command_id: str, message: str) -> 
         app.state.chat_commands[command_id] = {"status": "done", "response": reply}
     except Exception as exc:  # noqa: BLE001
         logger.error("Chat processing failed: %s", exc)
-        app.state.chat_commands[command_id] = {"status": "done", "response": f"Error: {exc}"}
+        app.state.chat_commands[command_id] = {"status": "done", "response": "An internal error occurred. Check logs."}
 
 
 async def _agent_broadcast_loop(app: FastAPI) -> None:
@@ -1110,6 +1107,7 @@ async def lifespan(app: FastAPI):
             try:
                 watch = session.query(WatchlistStock).filter(WatchlistStock.symbol == symbol).first()
                 quantity = int(getattr(watch, "quantity_to_buy", 1) or 1) if watch else 1
+                auto_trade = bool(getattr(watch, "auto_trade", False)) if watch else False
                 row = TradeSignal(
                     id=signal_id,
                     symbol=symbol,
@@ -1122,7 +1120,7 @@ async def lifespan(app: FastAPI):
                     fundamental_score=0.0,
                     risk_score=0.0,
                     overall_score=round(confidence * 100, 1),
-                    approval_status="pending",
+                    approval_status="approved" if auto_trade else "pending",
                     approval_reason=f"[{strategy_name}] {reason}",
                 )
                 session.add(row)
@@ -1146,13 +1144,25 @@ async def lifespan(app: FastAPI):
                 "overall_score": round(confidence * 100, 1),
                 "reason": reason,
                 "approval_reason": reason,
-                "approval_status": "pending",
+                "approval_status": "approved" if auto_trade else "pending",
                 "broker": "upstox",
                 "trade_segment": "intraday",
                 "expected_exit": round(price * (1.03 if side == "buy" else 0.97), 2),
             }
-            await send_approval_request(signal_payload)
-            logger.info("Strategy engine signal created: %s %s @ %.2f (confidence=%.2f)", side.upper(), symbol, price, confidence)
+            if auto_trade:
+                side_upper = side.upper()
+                await send_message(
+                    f"*AUTO-EXECUTING {side_upper} {symbol}*\n"
+                    f"Price: Rs {price:.2f}\n"
+                    f"Qty: {quantity}\n"
+                    f"Score: {confidence * 100:.1f}/100\n"
+                    f"Reason: {reason}\n"
+                    f"Strategy: {strategy_name}\n"
+                    f"Executing automatically per your strategy..."
+                )
+            else:
+                await send_approval_request(signal_payload)
+            logger.info("Strategy engine signal created: %s %s @ %.2f (confidence=%.2f, auto_trade=%s)", side.upper(), symbol, price, confidence, auto_trade)
         except Exception as exc:  # noqa: BLE001
             logger.error("Strategy signal handler failed: %s", exc)
 
@@ -1229,9 +1239,16 @@ async def lifespan(app: FastAPI):
                 "market_data",
                 start_fn=runtime.market_data.start,
                 stop_fn=runtime.market_data.stop,
-                health_check=lambda: asyncio.sleep(0) or (runtime.market_data is not None),
+                health_check=lambda: asyncio.sleep(0) or (
+                    runtime.market_data is not None
+                    and hasattr(runtime.market_data, '_ws')
+                    and runtime.market_data._ws is not None
+                    and hasattr(runtime.market_data._ws, '_mgr')
+                    and runtime.market_data._ws._mgr is not None
+                    and runtime.market_data._ws._mgr.is_healthy()
+                ),
                 health_interval=30.0,
-                required=False,
+                required=True,
             )
         if runtime.macro_agent and hasattr(runtime.macro_agent, 'start'):
             supervisor.register(
@@ -1301,8 +1318,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 if FRONTEND_DIST.exists():
@@ -1318,7 +1335,7 @@ async def health() -> dict[str, Any]:
 
 
 @app.get("/api/system/health")
-async def system_health(request: Request) -> dict[str, Any]:
+async def system_health(request: Request, user: dict = Depends(verify_token)) -> dict[str, Any]:  # noqa: B008
     """Return a compact summary used by the dashboard overview screen."""
     runtime = _runtime(request)
     cfg = load_tooling_config()
@@ -1335,14 +1352,11 @@ async def system_health(request: Request) -> dict[str, Any]:
     if cfg.hermes_enabled:
         hermes_client = HermesClient()
         ok, info = hermes_client.healthcheck()
-        hermes_status = "online" if ok else f"offline: {info}"
+        hermes_status = "online" if ok else "offline"
 
     snapshot = runtime.status()
-    session = SessionLocal()
-    try:
+    with db_session() as session:
         strategies = session.query(Strategy).all()
-    finally:
-        session.close()
     agents = await _build_agent_cards(request.app)
     agents_online = sum(1 for agent in agents if str(agent.get("status") or "").lower() in {"online", "running"})
 
@@ -1369,7 +1383,7 @@ async def system_health(request: Request) -> dict[str, Any]:
 
 
 @app.get("/api/risk/status")
-async def risk_status(request: Request) -> dict[str, Any]:
+async def risk_status(request: Request, user: dict = Depends(verify_token)) -> dict[str, Any]:  # noqa: B008
     """Return production risk manager state."""
     runtime = _runtime(request)
     prod_risk = getattr(runtime, "production_risk", None)
@@ -1405,17 +1419,17 @@ async def risk_status(request: Request) -> dict[str, Any]:
             },
         }
     except Exception as exc:
-        return {"enabled": True, "error": str(exc)}
+        return {"enabled": True, "error": "Internal error"}
 
 
 @app.get("/api/runtime/status")
-async def runtime_status(request: Request) -> dict[str, Any]:
+async def runtime_status(request: Request, user: dict = Depends(verify_token)) -> dict[str, Any]:  # noqa: B008
     """Expose the runtime snapshot for debugging and the agent monitor UI."""
     return _runtime(request).status()
 
 
 @app.get("/api/supervisor/status")
-async def supervisor_status(request: Request) -> dict[str, Any]:
+async def supervisor_status(request: Request, user: dict = Depends(verify_token)) -> dict[str, Any]:  # noqa: B008
     """Return ServiceSupervisor agent health and execution recovery stats."""
     supervisor = getattr(request.app.state, "supervisor", None)
     execution_recovery = getattr(request.app.state, "execution_recovery", None)
@@ -1426,14 +1440,14 @@ async def supervisor_status(request: Request) -> dict[str, Any]:
 
 
 @app.get("/api/circuit-breakers")
-async def circuit_breaker_status() -> dict[str, Any]:
+async def circuit_breaker_status(user: dict = Depends(verify_token)) -> dict[str, Any]:  # noqa: B008
     """Return status of all circuit breakers protecting external API calls."""
     from backend.infra.circuit_breaker import all_breakers_status
     return all_breakers_status()
 
 
 @app.post("/api/circuit-breakers/{name}/reset")
-async def reset_circuit_breaker(name: str) -> dict[str, Any]:
+async def reset_circuit_breaker(name: str, user: dict = Depends(require_admin)) -> dict[str, Any]:  # noqa: B008
     """Force-reset a specific circuit breaker to CLOSED."""
     from backend.infra.circuit_breaker import get_breaker
     breaker = get_breaker(name)
@@ -1442,8 +1456,9 @@ async def reset_circuit_breaker(name: str) -> dict[str, Any]:
 
 
 @app.get("/api/events/dead-letter")
-async def dead_letters(limit: int = 50) -> list[dict[str, Any]]:
+async def dead_letters(limit: int = 50, user: dict = Depends(verify_token)) -> list[dict[str, Any]]:  # noqa: B008
     """Return events that failed processing and were moved to the dead-letter queue."""
+    limit = min(max(limit, 1), 500)
     event_store = getattr(app.state, "event_store", None)
     if event_store is None:
         return []
@@ -1455,8 +1470,10 @@ async def replay_events(
     from_time: Optional[str] = None,
     event_type: Optional[str] = None,
     limit: int = 100,
+    user: dict = Depends(verify_token),  # noqa: B008
 ) -> list[dict[str, Any]]:
     """Replay events from a given timestamp."""
+    limit = min(max(limit, 1), 500)
     event_store = getattr(app.state, "event_store", None)
     if event_store is None:
         return []
@@ -1470,7 +1487,7 @@ async def replay_events(
 
 
 @app.post("/api/events/cleanup")
-async def cleanup_events() -> dict[str, Any]:
+async def cleanup_events(user: dict = Depends(require_admin)) -> dict[str, Any]:  # noqa: B008
     """Remove expired events based on TTL."""
     event_store = getattr(app.state, "event_store", None)
     if event_store is None:
@@ -1480,8 +1497,14 @@ async def cleanup_events() -> dict[str, Any]:
 
 
 @app.websocket("/ws/agent-monitor")
-async def ws_agent_monitor(websocket: WebSocket) -> None:
+async def ws_agent_monitor(websocket: WebSocket, token: Optional[str] = Query(default=None)) -> None:  # noqa: B008
     """Stream live agent status updates to the frontend monitor widget."""
+    if token:
+        from backend.auth import decode_token
+        payload = decode_token(token)
+        if not payload:
+            await websocket.close(code=4001, reason="Invalid token")
+            return
     manager: AgentConnectionManager = websocket.app.state.ws_manager
     await manager.connect(websocket)
     try:
@@ -1497,7 +1520,7 @@ async def ws_agent_monitor(websocket: WebSocket) -> None:
 
 
 @app.get("/agent-status")
-async def agent_status(request: Request) -> list[dict[str, Any]]:
+async def agent_status(request: Request, user: dict = Depends(verify_token)) -> list[dict[str, Any]]:  # noqa: B008
     """Return the same agent monitor payload used by the websocket UI."""
     return await _build_agent_cards(request.app)
 
@@ -1505,20 +1528,16 @@ async def agent_status(request: Request) -> list[dict[str, Any]]:
 @app.get("/settings")
 async def get_settings(user: dict = Depends(require_admin)) -> dict[str, Any]:  # noqa: B008
     """Return dashboard settings for the UI."""
-    session = SessionLocal()
-    try:
+    with db_session() as session:
         settings = dict(DEFAULT_SETTINGS)
         settings.update(_settings_as_dict(session))
         return settings
-    finally:
-        session.close()
 
 
 @app.post("/settings")
 async def save_settings(payload: SettingsPayload, user: dict = Depends(require_admin)) -> dict[str, Any]:  # noqa: B008
     """Persist dashboard settings and update live environment variables."""
-    session = SessionLocal()
-    try:
+    with db_session() as session:
         data = payload.model_dump(exclude_none=True)
         _persist_settings(session, data)
         session.commit()
@@ -1529,8 +1548,6 @@ async def save_settings(payload: SettingsPayload, user: dict = Depends(require_a
             else:
                 disable_trading()
         return await get_settings(user=user)
-    finally:
-        session.close()
 
 
 @app.get("/api/kill-switch")
@@ -1566,6 +1583,7 @@ async def set_kill_switch(payload: dict[str, Any], user: dict = Depends(require_
 async def login(
     username: str = Form(...),
     password: str = Form(...),
+    _rl: None = Depends(rate_limit("login", 5, 60)),  # noqa: B008
 ) -> dict[str, Any]:
     """Return a JWT after verifying the username/password pair."""
     user = verify_user(username, password)
@@ -1644,14 +1662,11 @@ async def broker_positions(request: Request) -> Any:
 
 
 @app.get("/api/watchlist")
-async def get_watchlist() -> list[dict[str, Any]]:
+async def get_watchlist(user: dict = Depends(verify_token)) -> list[dict[str, Any]]:  # noqa: B008
     """Return the active watchlist rows."""
-    session = SessionLocal()
-    try:
+    with db_session() as session:
         rows = session.query(WatchlistStock).order_by(WatchlistStock.id.desc()).all()
         return [_watchlist_row(row) for row in rows]
-    finally:
-        session.close()
 
 
 @app.post("/api/watchlist/add")
@@ -1660,8 +1675,7 @@ async def add_watchlist(payload: WatchlistPayload, request: Request, user: dict 
     symbol = _normalize_symbol(payload.symbol)
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
-    session = SessionLocal()
-    try:
+    with db_session() as session:
         row = session.query(WatchlistStock).filter(WatchlistStock.symbol == symbol).first()
         if row is None:
             row = WatchlistStock(symbol=symbol)
@@ -1673,8 +1687,6 @@ async def add_watchlist(payload: WatchlistPayload, request: Request, user: dict 
         row.added_date = row.added_date or _utc_now()
         row.last_checked = _utc_now()
         session.commit()
-    finally:
-        session.close()
 
     runtime = _runtime(request)
     await runtime.refresh_watchlist()
@@ -1705,7 +1717,7 @@ async def remove_watchlist(payload: dict[str, Any], request: Request, user: dict
 
 
 @app.get("/api/signals/pending")
-async def pending_signals() -> list[dict[str, Any]]:
+async def pending_signals(user: dict = Depends(verify_token)) -> list[dict[str, Any]]:  # noqa: B008
     """Return pending signals for approval."""
     session = SessionLocal()
     try:
@@ -1721,7 +1733,7 @@ async def pending_signals() -> list[dict[str, Any]]:
 
 
 @app.get("/api/signals/approved")
-async def approved_signals() -> list[dict[str, Any]]:
+async def approved_signals(user: dict = Depends(verify_token)) -> list[dict[str, Any]]:  # noqa: B008
     """Return approved signals for the execution agent."""
     session = SessionLocal()
     try:
@@ -1771,7 +1783,11 @@ async def skip_signal(payload: SignalActionPayload, user: dict = Depends(verify_
 
 
 @app.patch("/api/signals/{signal_id}")
-async def patch_signal(signal_id: str, payload: SignalPatchPayload) -> dict[str, Any]:
+async def patch_signal(
+    signal_id: str,
+    payload: SignalPatchPayload,
+    user: dict = Depends(verify_token_or_service),  # noqa: B008
+) -> dict[str, Any]:
     """Patch a signal status from Telegram or the execution agent."""
     session = SessionLocal()
     try:
@@ -1808,6 +1824,8 @@ async def buy_signal(payload: dict[str, Any], request: Request, user: dict = Dep
     strategy_id = str(payload.get("strategy_id") or "default")
     reason = str(payload.get("reason") or payload.get("approval_reason") or "Technical signal")
     signal_id = str(payload.get("id") or uuid.uuid4().hex)
+    if not re.match(r'^[a-f0-9]{32}$', signal_id):
+        signal_id = uuid.uuid4().hex
 
     session = SessionLocal()
     try:
@@ -1822,6 +1840,7 @@ async def buy_signal(payload: dict[str, Any], request: Request, user: dict = Dep
         watch.last_signal = side
         watch.last_signal_price = price
         watch.last_checked = _utc_now()
+        auto_trade = bool(watch.auto_trade)
 
         row = session.query(TradeSignal).filter(TradeSignal.id == signal_id).first()
         if row is None:
@@ -1837,7 +1856,7 @@ async def buy_signal(payload: dict[str, Any], request: Request, user: dict = Dep
         row.fundamental_score = float(payload.get("fundamental_score") or 0.0)
         row.risk_score = float(payload.get("risk_score") or 0.0)
         row.overall_score = float(payload.get("overall_score") or payload.get("score") or 0.0)
-        row.approval_status = "pending"
+        row.approval_status = "approved" if auto_trade else "pending"
         row.approval_reason = reason
         row.order_id = None
         row.execution_price = None
@@ -1865,17 +1884,27 @@ async def buy_signal(payload: dict[str, Any], request: Request, user: dict = Dep
         "overall_score": float(payload.get("overall_score") or payload.get("score") or 0.0),
         "reason": reason,
         "approval_reason": reason,
-        "approval_status": "pending",
+        "approval_status": "approved" if auto_trade else "pending",
         "broker": str(payload.get("broker") or "upstox"),
         "trade_segment": str(payload.get("trade_segment") or "intraday"),
         "expected_exit": round(expected_exit, 2),
     }
-    await send_approval_request(signal_payload)
+    if auto_trade:
+        side_upper = side.upper()
+        await send_message(
+            f"*AUTO-EXECUTING {side_upper} {symbol}*\n"
+            f"Price: Rs {price:.2f}\n"
+            f"Qty: {watch_quantity}\n"
+            f"Reason: {reason}\n"
+            f"Executing automatically per your strategy..."
+        )
+    else:
+        await send_approval_request(signal_payload)
     return {"status": "queued", "signal_id": signal_id}
 
 
 @app.get("/api/portfolio")
-async def api_portfolio(request: Request) -> dict[str, Any]:
+async def api_portfolio(request: Request, user: dict = Depends(verify_token)) -> dict[str, Any]:  # noqa: B008
     """Return the portfolio summary for the overview screen."""
     return _portfolio_summary(_runtime(request))
 
@@ -1887,7 +1916,7 @@ async def portfolio_alias(request: Request) -> dict[str, Any]:
 
 
 @app.get("/positions")
-async def positions(request: Request) -> list[dict[str, Any]]:
+async def positions(request: Request, user: dict = Depends(verify_token)) -> list[dict[str, Any]]:  # noqa: B008
     """Return the current position list used by the trading screen."""
     return _position_snapshot(_runtime(request))
 
@@ -1943,8 +1972,15 @@ async def close_position(symbol: str, request: Request, user: dict = Depends(ver
 
 
 @app.post("/trade")
-async def trade(request_payload: TradeRequest, request: Request, user: dict = Depends(verify_token)) -> dict[str, Any]:  # noqa: B008
+async def trade(
+    request_payload: TradeRequest,
+    request: Request,
+    user: dict = Depends(verify_token),  # noqa: B008
+    _rl: None = Depends(rate_limit("trade", 10, 60)),  # noqa: B008
+) -> dict[str, Any]:
     """Place a manual order from the trading page."""
+    if request_payload.mode.lower() == "live" and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Live trading requires admin role")
     runtime = _runtime(request)
     if request_payload.mode.lower() == "live" and not is_trading_enabled():
         raise HTTPException(status_code=400, detail="Trading is disabled by the kill switch")
@@ -2010,32 +2046,25 @@ async def trade(request_payload: TradeRequest, request: Request, user: dict = De
 
 
 @app.get("/order-history")
-async def order_history(request: Request) -> list[dict[str, Any]]:
+async def order_history(request: Request, user: dict = Depends(verify_token)) -> list[dict[str, Any]]:  # noqa: B008
     """Merge manual trades with automated executions for the trading screen."""
     del request
-    session = SessionLocal()
-    try:
+    with db_session() as session:
         return _trade_history(session)
-    finally:
-        session.close()
 
 
 @app.get("/strategies")
-async def strategies() -> list[dict[str, Any]]:
+async def strategies(user: dict = Depends(verify_token)) -> list[dict[str, Any]]:  # noqa: B008
     """Return strategy rows with a synthetic equity curve for the chart."""
-    session = SessionLocal()
-    try:
+    with db_session() as session:
         rows = session.query(Strategy).order_by(Strategy.id.desc()).all()
         return [_strategy_payload(session, row) for row in rows]
-    finally:
-        session.close()
 
 
 @app.post("/strategy/create")
 async def create_strategy(payload: dict[str, Any], user: dict = Depends(require_admin)) -> dict[str, Any]:  # noqa: B008
     """Create a strategy entry from the UI form."""
-    session = SessionLocal()
-    try:
+    with db_session() as session:
         strategy_id = str(payload.get("id") or uuid.uuid4().hex)
         row = session.query(Strategy).filter(Strategy.id == strategy_id).first()
         if row is None:
@@ -2050,15 +2079,12 @@ async def create_strategy(payload: dict[str, Any], user: dict = Depends(require_
         row.created_date = row.created_date or _utc_now()
         session.commit()
         return {"ok": True, "id": strategy_id}
-    finally:
-        session.close()
 
 
 @app.delete("/strategy/{strategy_id}")
 async def delete_strategy(strategy_id: str, user: dict = Depends(require_admin)) -> dict[str, Any]:  # noqa: B008
     """Delete a strategy row."""
-    session = SessionLocal()
-    try:
+    with db_session() as session:
         row = session.query(Strategy).filter(Strategy.id == strategy_id).first()
         if row is None:
             raise HTTPException(status_code=404, detail="Strategy not found")
@@ -2074,15 +2100,12 @@ async def delete_strategy(strategy_id: str, user: dict = Depends(require_admin))
                 "entry_rule": s.entry_rule, "exit_rule": s.exit_rule,
             } for s in all_strats])
         return {"ok": True}
-    finally:
-        session.close()
 
 
 @app.put("/strategy/{strategy_id}")
 async def edit_strategy(strategy_id: str, payload: dict[str, Any], user: dict = Depends(require_admin)) -> dict[str, Any]:  # noqa: B008
     """Update an existing strategy."""
-    session = SessionLocal()
-    try:
+    with db_session() as session:
         row = session.query(Strategy).filter(Strategy.id == strategy_id).first()
         if row is None:
             raise HTTPException(status_code=404, detail="Strategy not found")
@@ -2109,8 +2132,6 @@ async def edit_strategy(strategy_id: str, payload: dict[str, Any], user: dict = 
                 "entry_rule": s.entry_rule, "exit_rule": s.exit_rule,
             } for s in all_strats])
         return {"ok": True, "id": strategy_id}
-    finally:
-        session.close()
 
 
 @app.post("/strategy/{strategy_id}/reload")
@@ -2143,7 +2164,11 @@ async def generate_pinescript(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.post("/strategy/generate")
-async def hermes_generate_strategy(payload: dict[str, Any]) -> dict[str, Any]:
+async def hermes_generate_strategy(
+    payload: dict[str, Any],
+    user: dict = Depends(require_admin),  # noqa: B008
+    _rl: None = Depends(rate_limit("strategy_gen", 5, 60)),  # noqa: B008
+) -> dict[str, Any]:
     """Generate a new strategy using Hermes AI reasoning."""
     symbol = str(payload.get("symbol") or "INFY").upper().strip()
     timeframe = str(payload.get("timeframe") or "1d").strip()
@@ -2235,13 +2260,10 @@ async def hermes_generate_strategy(payload: dict[str, Any]) -> dict[str, Any]:
 @app.post("/strategy/validate/{strategy_id}")
 async def hermes_validate_strategy(strategy_id: str) -> dict[str, Any]:
     """Validate a strategy using Hermes AI and real backtest data."""
-    session = SessionLocal()
-    try:
+    with db_session() as session:
         row = session.query(Strategy).filter(Strategy.id == strategy_id).first()
         if row is None:
             raise HTTPException(status_code=404, detail="Strategy not found")
-    finally:
-        session.close()
 
     from backend.agents.hermes_strategy_agent import HermesStrategyAgent
     from backend.integrations.hermes_client import HermesClient
@@ -2281,13 +2303,10 @@ async def hermes_validate_strategy(strategy_id: str) -> dict[str, Any]:
 @app.post("/strategy/tune/{strategy_id}")
 async def hermes_tune_strategy(strategy_id: str) -> dict[str, Any]:
     """Ask Hermes to suggest one parameter improvement for a strategy."""
-    session = SessionLocal()
-    try:
+    with db_session() as session:
         row = session.query(Strategy).filter(Strategy.id == strategy_id).first()
         if row is None:
             raise HTTPException(status_code=404, detail="Strategy not found")
-    finally:
-        session.close()
 
     from backend.agents.hermes_strategy_agent import HermesStrategyAgent
     from backend.integrations.hermes_client import HermesClient
@@ -2315,13 +2334,10 @@ async def hermes_tune_strategy(strategy_id: str) -> dict[str, Any]:
 @app.get("/strategy/explain/{strategy_id}")
 async def hermes_explain_strategy(strategy_id: str) -> dict[str, Any]:
     """Get a natural language explanation of a strategy from Hermes."""
-    session = SessionLocal()
-    try:
+    with db_session() as session:
         row = session.query(Strategy).filter(Strategy.id == strategy_id).first()
         if row is None:
             raise HTTPException(status_code=404, detail="Strategy not found")
-    finally:
-        session.close()
 
     from backend.agents.hermes_strategy_agent import HermesStrategyAgent
     from backend.integrations.hermes_client import HermesClient
@@ -2343,7 +2359,7 @@ async def hermes_explain_strategy(strategy_id: str) -> dict[str, Any]:
 
 
 @app.post("/strategy/auto-generate")
-async def hermes_auto_generate() -> dict[str, Any]:
+async def hermes_auto_generate(user: dict = Depends(require_admin)) -> dict[str, Any]:  # noqa: B008
     """Trigger background strategy generation for all watchlist symbols."""
     from backend.agents.strategy_generator_agent import StrategyGeneratorAgent
     from backend.integrations.hermes_client import HermesClient
@@ -2479,7 +2495,11 @@ def _parse_strategy_params(entry_rule: str, exit_rule: str) -> dict:
 
 
 @app.post("/backtest")
-async def backtest(payload: BacktestRequest) -> dict[str, Any]:
+async def backtest(
+    payload: BacktestRequest,
+    user: dict = Depends(require_admin),  # noqa: B008
+    _rl: None = Depends(rate_limit("backtest", 3, 60)),  # noqa: B008
+) -> dict[str, Any]:
     """Run a synthetic backtest so the UI has a working results panel."""
     result = _backtest_result(payload)
     session = SessionLocal()
@@ -2506,20 +2526,22 @@ async def backtest(payload: BacktestRequest) -> dict[str, Any]:
 
 
 @app.get("/screener")
-async def screener(request: Request) -> list[dict[str, Any]]:
+async def screener(request: Request, user: dict = Depends(verify_token)) -> list[dict[str, Any]]:  # noqa: B008
     """Return a synthetic screener result table."""
     runtime = _runtime(request)
-    session = SessionLocal()
-    try:
+    with db_session() as session:
         rows = _screener_rows(runtime, session)
         rows.sort(key=lambda item: item["rank"])
         return rows
-    finally:
-        session.close()
 
 
 @app.post("/chat")
-async def chat(payload: ChatRequest, request: Request) -> dict[str, Any]:
+async def chat(
+    payload: ChatRequest,
+    request: Request,
+    user: dict = Depends(verify_token),  # noqa: B008
+    _rl: None = Depends(rate_limit("chat", 10, 60)),  # noqa: B008
+) -> dict[str, Any]:
     """Queue a chat command for the Ollama-backed boss agent."""
     message = payload.message.strip()
     if not message:
@@ -2532,12 +2554,9 @@ async def chat(payload: ChatRequest, request: Request) -> dict[str, Any]:
         for k in oldest_keys:
             cmds.pop(k, None)
     cmds[command_id] = {"status": "running", "response": None}
-    session = SessionLocal()
-    try:
+    with db_session() as session:
         session.add(ChatHistory(user_id="user", role="user", message=message, timestamp=_utc_now()))
         session.commit()
-    finally:
-        session.close()
     asyncio.create_task(_process_chat_command(request.app, command_id, message))
     return {"command_id": command_id, "status": "running"}
 

@@ -19,8 +19,9 @@ export function AgentMonitor() {
 
     function connect() {
       try {
+        const token = localStorage.getItem('access_token') || '';
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        ws = new WebSocket(`${protocol}//${window.location.host}/ws/agent-monitor`);
+        ws = new WebSocket(`${protocol}//${window.location.host}/ws/agent-monitor?token=${encodeURIComponent(token)}`);
         ws.onopen = () => {
           setWsError(false);
           reconnectCount = 0;
@@ -36,8 +37,14 @@ export function AgentMonitor() {
           }
         };
         ws.onerror = () => setWsError(true);
-        ws.onclose = () => {
+        ws.onclose = (event) => {
           setWsError(true);
+          if (event.code === 4001) {
+            localStorage.removeItem('access_token');
+            localStorage.removeItem('username');
+            window.location.reload();
+            return;
+          }
           if (reconnectCount < maxReconnect) {
             reconnectCount++;
             reconnectRef.current = setTimeout(connect, Math.min(1000 * Math.pow(2, reconnectCount), 30000));

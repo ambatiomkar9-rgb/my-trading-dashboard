@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from typing import Any
 
 import httpx
@@ -14,10 +15,12 @@ def _normalize_dashboard_url(raw_url: str | None) -> str:
     url = str(raw_url or "").strip().rstrip("/")
     if not url:
         return "http://127.0.0.1:8000"
-    if url.startswith("http://localhost"):
-        return url.replace("localhost", "127.0.0.1", 1)
+    if url.startswith("http://localhost") or url.startswith("http://127.0.0.1"):
+        return url
     if url.startswith("https://localhost"):
         return url.replace("localhost", "127.0.0.1", 1)
+    if url.startswith("http://"):
+        logger.warning("Dashboard URL is HTTP in production — tokens may be sent in cleartext")
     return url
 
 
@@ -103,18 +106,27 @@ async def send_approval_request(signal: dict[str, Any]) -> bool:
 
 
 async def send_message(text: str) -> bool:
-    """Send a plain Telegram message."""
+    """Send a plain Telegram message with retry."""
     try:
         cfg = _telegram_config()
         if not cfg["token"] or not cfg["chat_id"]:
             return False
-        async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
-            resp = await client.post(
-                f"{cfg['base']}/sendMessage",
-                json={"chat_id": cfg["chat_id"], "text": text, "parse_mode": "Markdown"},
-            )
-            resp.raise_for_status()
-            return bool(resp.json().get("ok", False))
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
+                    resp = await client.post(
+                        f"{cfg['base']}/sendMessage",
+                        json={"chat_id": cfg["chat_id"], "text": text, "parse_mode": "Markdown"},
+                    )
+                    resp.raise_for_status()
+                    return bool(resp.json().get("ok", False))
+            except Exception as exc:  # noqa: BLE001
+                if attempt < 2:
+                    logger.warning("Telegram send attempt %d failed: %s", attempt + 1, exc)
+                    await asyncio.sleep(1.0 * (attempt + 1))
+                else:
+                    logger.error("Telegram message failed after 3 attempts: %s", exc)
+                    return False
     except Exception as exc:  # noqa: BLE001
         logger.error("Telegram message error: %s", exc)
         return False
@@ -200,21 +212,29 @@ class TelegramCallbackPoller:
             user = callback.get("from", {}).get("first_name", "User")
 
             if data.startswith("approve_"):
-                signal_id = data.split("_", 1)[1]
-                await answer_callback(callback_id, "✅ Signal approved!")
+                raw_id = data.split("_", 1)[1]
+                if not re.match(r'^[a-f0-9]{32}$', raw_id):
+                    await answer_callback(callback_id, "Invalid signal ID")
+                    return
+                signal_id = raw_id
+                await answer_callback(callback_id, "Signal approved!")
                 ok = await self._update_signal(signal_id, "approved", "Telegram approved")
                 if ok:
-                    await send_message(f"✅ *{user} approved signal #{signal_id}*\nExecuting now…")
+                    await send_message(f"*{user} approved signal #{signal_id}*\nExecuting now...")
                 else:
-                    await send_message(f"⚠️ *{user} approved signal #{signal_id}* but dashboard update failed")
+                    await send_message(f"*{user} approved signal #{signal_id}* but dashboard update failed")
             elif data.startswith("reject_"):
-                signal_id = data.split("_", 1)[1]
-                await answer_callback(callback_id, "❌ Signal rejected")
+                raw_id = data.split("_", 1)[1]
+                if not re.match(r'^[a-f0-9]{32}$', raw_id):
+                    await answer_callback(callback_id, "Invalid signal ID")
+                    return
+                signal_id = raw_id
+                await answer_callback(callback_id, "Signal rejected")
                 ok = await self._update_signal(signal_id, "rejected", "Telegram rejected")
                 if ok:
-                    await send_message(f"❌ *{user} rejected signal #{signal_id}*")
+                    await send_message(f"*{user} rejected signal #{signal_id}*")
                 else:
-                    await send_message(f"⚠️ *{user} rejected signal #{signal_id}* but dashboard update failed")
+                    await send_message(f"*{user} rejected signal #{signal_id}* but dashboard update failed")
         except Exception as exc:  # noqa: BLE001
             logger.error("Callback handling failed: %s", exc)
 

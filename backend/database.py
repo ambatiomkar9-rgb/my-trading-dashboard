@@ -2,7 +2,9 @@
 Trading Dashboard - Database Models
 SQLAlchemy ORM models for all tables
 """
+import logging
 import os
+from contextlib import contextmanager
 from sqlalchemy import (
     create_engine,
     Column,
@@ -15,7 +17,9 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, DBAPIError
+
+logger = logging.getLogger(__name__)
 
 # ─── Database URL ────────────────────────────────────────────────────────────
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./trading_dashboard.db")
@@ -42,6 +46,30 @@ engine = create_engine(
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+
+@contextmanager
+def db_session():
+    """Context manager that yields a SQLAlchemy session and auto-closes on success or error.
+
+    If a DBAPI/OperationalError occurs, logs the error and re-raises as a
+    user-friendly HTTP exception.
+    """
+    session = SessionLocal()
+    try:
+        yield session
+    except (OperationalError, DBAPIError) as exc:
+        logger.error("Database error: %s", exc)
+        session.rollback()
+        raise HTTPException(status_code=503, detail="Database temporarily unavailable. Please try again.")
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+from fastapi import HTTPException  # noqa: E402
 
 
 # ─── Models ──────────────────────────────────────────────────────────────────
