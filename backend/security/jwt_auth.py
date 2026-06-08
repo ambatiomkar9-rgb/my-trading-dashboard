@@ -88,7 +88,17 @@ class JwtAuth:
 def load_jwt_auth() -> Optional[JwtAuth]:
     secret = os.getenv("JWT_SECRET_KEY", "").strip()
     if not secret:
-        return None
+        # Auto-generate a persistent secret key stored on disk
+        key_path = os.path.join(os.path.dirname(__file__), ".jwt_secret")
+        if os.path.exists(key_path):
+            with open(key_path, "r") as f:
+                secret = f.read().strip()
+        if not secret:
+            import secrets as _secrets
+            secret = _secrets.token_urlsafe(32)
+            with open(key_path, "w") as f:
+                f.write(secret)
+            os.chmod(key_path, 0o600)
     ttl = int(os.getenv("JWT_ACCESS_TTL_SEC", "28800"))
     issuer = os.getenv("JWT_ISSUER", "trading-dashboard")
     return JwtAuth(JwtConfig(secret_key=secret, access_token_ttl_sec=ttl, issuer=issuer))
