@@ -12,6 +12,9 @@ try:
     from backend.agents.trade_execution_agent import TradeExecutionAgent  # type: ignore
     from backend.agents.macro_intelligence_agent import MacroIntelligenceAgent  # type: ignore
     from backend.agents.whale_intelligence_agent import WhaleIntelligenceAgent  # type: ignore
+    from backend.agents.strategy_generator_agent import StrategyGeneratorAgent  # type: ignore
+    from backend.agents.hermes_strategy_agent import HermesStrategyAgent  # type: ignore
+    from backend.memory.strategy_memory import StrategyLessonRepository  # type: ignore
     from backend.brokers.paper_broker import PaperBroker, PaperBrokerRouter  # type: ignore
     from backend.execution.auth.broker_auth_manager import BrokerAuthManager  # type: ignore
     from backend.market_data.market_data_engine import MarketDataEngine  # type: ignore
@@ -25,6 +28,9 @@ except ModuleNotFoundError:  # noqa: BLE001
     from agents.trade_execution_agent import TradeExecutionAgent  # type: ignore
     from agents.macro_intelligence_agent import MacroIntelligenceAgent  # type: ignore
     from agents.whale_intelligence_agent import WhaleIntelligenceAgent  # type: ignore
+    from agents.strategy_generator_agent import StrategyGeneratorAgent  # type: ignore
+    from agents.hermes_strategy_agent import HermesStrategyAgent  # type: ignore
+    from memory.strategy_memory import StrategyLessonRepository  # type: ignore
     from brokers.paper_broker import PaperBroker, PaperBrokerRouter  # type: ignore
     from execution.auth.broker_auth_manager import BrokerAuthManager  # type: ignore
     from market_data.market_data_engine import MarketDataEngine  # type: ignore
@@ -75,6 +81,7 @@ class TradingSystemRuntime:
         self.whale_agent: WhaleIntelligenceAgent | None = None
         self.telegram_poller: TelegramCallbackPoller | None = None
         self.technical_agent: Any | None = None
+        self.strategy_generator_agent: StrategyGeneratorAgent | None = None
         self._tasks: dict[str, asyncio.Task[Any]] = {}
         self._running = False
         self._watchlist_symbols: list[str] = []
@@ -226,6 +233,7 @@ class TradingSystemRuntime:
             "news_agent_online": self.news_agent is not None,
             "macro_agent_online": self.macro_agent is not None,
             "whale_agent_online": self.whale_agent is not None,
+            "strategy_generator_online": self.strategy_generator_agent is not None,
             "telegram_online": self.telegram_poller is not None,
             "technical_agent_online": self.technical_agent is not None,
             "tasks": {name: not task.done() for name, task in self._tasks.items()},
@@ -279,6 +287,22 @@ class TradingSystemRuntime:
             # Start whale intelligence agent (always runs — tracks institutional flows)
             self.whale_agent = WhaleIntelligenceAgent(self.event_bus)
             self._spawn("whale", self.whale_agent.start())
+
+            # Start strategy generator agent (auto-generates strategies using Hermes)
+            try:
+                hermes_agent = HermesStrategyAgent(event_bus=self.event_bus)
+                strategy_memory = StrategyLessonRepository()
+                self.strategy_generator_agent = StrategyGeneratorAgent(
+                    hermes_strategy_agent=hermes_agent,
+                    strategy_memory=strategy_memory,
+                    event_bus=self.event_bus,
+                    interval_seconds=int(os.getenv("STRATEGY_GEN_INTERVAL", "300")),
+                    max_strategies=int(os.getenv("STRATEGY_GEN_MAX", "50")),
+                )
+                self._spawn("strategy_gen", self.strategy_generator_agent.start())
+                logger.info("Strategy generator agent started")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Strategy generator startup failed: %s", exc)
 
             telegram_disabled = os.getenv("TELEGRAM_DISABLED", "").strip().lower() in {"1", "true", "yes", "on"}
             if not telegram_disabled and os.getenv("TELEGRAM_BOT_TOKEN", "").strip() and os.getenv("DASHBOARD_API_TOKEN", "").strip():

@@ -54,6 +54,7 @@ from backend.runtime.service_supervisor import ServiceSupervisor
 from backend.runtime.execution_recovery import ExecutionRecoveryManager
 from backend.strategy.strategy_engine import StrategyEngine
 from backend.user_store import create_user, ensure_default_admin, update_password, verify_user
+from backend.memory.strategy_memory import StrategyLesson  # noqa: E402 — register model before init_db
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -879,6 +880,14 @@ async def _build_agent_cards(app: FastAPI) -> list[dict[str, Any]]:
         "progress": 100 if whale_online else 0,
     })
 
+    strat_gen_online = snapshot.get("strategy_generator_online", False)
+    cards.append({
+        "agent_id": "strategy_generator",
+        "status": "online" if strat_gen_online else "offline",
+        "task": "Auto-generating strategies from Hermes" if strat_gen_online else "Waiting to start",
+        "progress": 100 if strat_gen_online else 0,
+    })
+
     for strategy in strategies[:10]:
         status, progress = _strategy_status_label(str(getattr(strategy, "status", "") or "paused"))
         cards.append(
@@ -1265,6 +1274,18 @@ async def lifespan(app: FastAPI):
                 start_fn=runtime.whale_agent.start,
                 stop_fn=runtime.whale_agent.stop,
                 health_check=lambda: asyncio.sleep(0) or (runtime.whale_agent is not None),
+                health_interval=300.0,
+                required=False,
+            )
+        if runtime.strategy_generator_agent and hasattr(runtime.strategy_generator_agent, 'start'):
+            supervisor.register(
+                "strategy_generator",
+                start_fn=runtime.strategy_generator_agent.start,
+                stop_fn=runtime.strategy_generator_agent.stop,
+                health_check=lambda: asyncio.sleep(0) or (
+                    runtime.strategy_generator_agent is not None
+                    and runtime.strategy_generator_agent._running
+                ),
                 health_interval=300.0,
                 required=False,
             )
