@@ -212,6 +212,20 @@ export function StrategiesPage() {
     }
   };
 
+  const toggleStatus = async (strat: Strategy) => {
+    const newStatus = strat.status === 'running' ? 'paused' : 'running';
+    try {
+      await apiFetch(`/strategy/${strat.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: newStatus }),
+      });
+      await fetchStrategies();
+    } catch (e: any) {
+      alert(e?.message || 'Failed to toggle status');
+    }
+  };
+
   const hermesAutoGenerate = async () => {
     setHermesAutoGenerating(true);
     try {
@@ -425,7 +439,11 @@ export function StrategiesPage() {
                     <td className="px-4 py-3">{strat.timeframe}</td>
                     <td className="px-4 py-3">
                       <span
-                        className={`px-2 py-1 rounded text-sm ${
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleStatus(strat);
+                        }}
+                        className={`px-2 py-1 rounded text-sm cursor-pointer hover:opacity-80 ${
                           strat.status === 'running'
                             ? 'bg-green-900 text-green-400'
                             : strat.status === 'paused'

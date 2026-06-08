@@ -139,7 +139,7 @@ class StrategyGeneratorAgent:
                 name=f"Auto-{symbol}",
                 symbol=symbol,
                 timeframe="1d",
-                status="paused",
+                status="running",
                 entry_rule=str(result.get("entry_rule", "")),
                 exit_rule=str(result.get("exit_rule", "")),
                 created_date=datetime.now(timezone.utc).isoformat(),
