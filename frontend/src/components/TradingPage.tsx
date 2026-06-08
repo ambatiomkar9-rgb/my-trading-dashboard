@@ -1,7 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { api } from '../api';
-
-const API_URL = '';
+import { apiFetch } from '../api';
 
 interface Position {
   symbol: string;
@@ -38,22 +36,11 @@ export function TradingPage() {
   useEffect(() => {
     fetchPositions();
     fetchOrders();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
-
-  const safeJson = async (res: Response) => {
-    const text = await res.text();
-    try {
-      return text ? JSON.parse(text) : {};
-    } catch {
-      return { raw: text };
-    }
-  };
 
   const fetchPositions = async () => {
     try {
-      const res = await fetch(`${API_URL}/positions`);
-      const data = await safeJson(res);
+      const data = await apiFetch('/positions');
       setPositions(Array.isArray(data) ? data : []);
     } catch {
       setPositions([]);
@@ -62,8 +49,7 @@ export function TradingPage() {
 
   const fetchOrders = async () => {
     try {
-      const res = await fetch(`${API_URL}/order-history`);
-      const data = await safeJson(res);
+      const data = await apiFetch('/order-history');
       setOrders(Array.isArray(data) ? data : []);
     } catch {
       setOrders([]);
@@ -72,21 +58,23 @@ export function TradingPage() {
 
   const handlePlaceOrder = async (e: React.FormEvent) => {
     e.preventDefault();
-
     if (!formData.symbol || !formData.qty || !formData.price) {
       alert('Please fill all required fields');
       return;
     }
-
     try {
-      const data = await api.post('/trade', {
-        symbol: formData.symbol,
-        side: formData.side,
-        quantity: parseFloat(formData.qty),
-        price: parseFloat(formData.price),
-        stop_loss: formData.stopLoss ? parseFloat(formData.stopLoss) : null,
-        take_profit: formData.takeProfit ? parseFloat(formData.takeProfit) : null,
-        mode,
+      await apiFetch('/trade', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbol: formData.symbol,
+          side: formData.side,
+          quantity: parseFloat(formData.qty),
+          price: parseFloat(formData.price),
+          stop_loss: formData.stopLoss ? parseFloat(formData.stopLoss) : null,
+          take_profit: formData.takeProfit ? parseFloat(formData.takeProfit) : null,
+          mode,
+        }),
       });
       setFormData({ symbol: '', side: 'buy', qty: '', price: '', stopLoss: '', takeProfit: '' });
       await Promise.all([fetchPositions(), fetchOrders()]);
@@ -98,7 +86,7 @@ export function TradingPage() {
 
   const handleClosePosition = async (symbol: string) => {
     try {
-      await api.delete(`/positions/${encodeURIComponent(symbol)}`);
+      await apiFetch(`/positions/${encodeURIComponent(symbol)}`, { method: 'DELETE' });
       await fetchPositions();
     } catch (error) {
       console.error('Error closing position:', error);
@@ -145,32 +133,20 @@ export function TradingPage() {
                     <td className="px-4 py-3 text-right">{pos.qty}</td>
                     <td className="px-4 py-3 text-right">₹{Number(pos.entry_price).toFixed(2)}</td>
                     <td className="px-4 py-3 text-right">₹{Number(pos.current_price).toFixed(2)}</td>
-                    <td
-                      className={`px-4 py-3 text-right font-semibold ${
-                        pos.pnl >= 0 ? 'text-green-400' : 'text-red-400'
-                      }`}
-                    >
-                      {pos.pnl >= 0 ? '+' : ''}
-                      {Number(pos.pnl).toFixed(2)}
+                    <td className={`px-4 py-3 text-right font-semibold ${pos.pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      {pos.pnl >= 0 ? '+' : ''}{Number(pos.pnl).toFixed(2)}
                     </td>
                     <td className={`px-4 py-3 text-right ${pos.pnl_pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                      {pos.pnl_pct >= 0 ? '+' : ''}
-                      {Number(pos.pnl_pct).toFixed(2)}%
+                      {pos.pnl_pct >= 0 ? '+' : ''}{Number(pos.pnl_pct).toFixed(2)}%
                     </td>
                     <td className="px-4 py-3 text-center">
-                      <button
-                        onClick={() => handleClosePosition(pos.symbol)}
-                        className="px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700"
-                      >
-                        Close
-                      </button>
+                      <button onClick={() => handleClosePosition(pos.symbol)} className="px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700">Close</button>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-
           {positions.length === 0 && <div className="p-6 text-center text-gray-400">No active positions</div>}
         </div>
       </section>
@@ -181,79 +157,37 @@ export function TradingPage() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
             <div>
               <label className="block text-sm font-medium mb-2">Symbol</label>
-              <input
-                type="text"
-                placeholder="INFY"
-                value={formData.symbol}
-                onChange={(e) => setFormData({ ...formData, symbol: e.target.value.toUpperCase() })}
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white"
-              />
+              <input type="text" placeholder="INFY" value={formData.symbol} onChange={(e) => setFormData({ ...formData, symbol: e.target.value.toUpperCase() })} className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white" />
             </div>
             <div>
               <label className="block text-sm font-medium mb-2">Side</label>
-              <select
-                value={formData.side}
-                onChange={(e) => setFormData({ ...formData, side: e.target.value as 'buy' | 'sell' })}
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white"
-              >
+              <select value={formData.side} onChange={(e) => setFormData({ ...formData, side: e.target.value as 'buy' | 'sell' })} className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white">
                 <option value="buy">Buy</option>
                 <option value="sell">Sell</option>
               </select>
             </div>
           </div>
-
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
             <div>
               <label className="block text-sm font-medium mb-2">Quantity</label>
-              <input
-                type="number"
-                placeholder="100"
-                value={formData.qty}
-                onChange={(e) => setFormData({ ...formData, qty: e.target.value })}
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white"
-              />
+              <input type="number" placeholder="100" value={formData.qty} onChange={(e) => setFormData({ ...formData, qty: e.target.value })} className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white" />
             </div>
             <div>
               <label className="block text-sm font-medium mb-2">Price</label>
-              <input
-                type="number"
-                step="0.01"
-                placeholder="1955.50"
-                value={formData.price}
-                onChange={(e) => setFormData({ ...formData, price: e.target.value })}
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white"
-              />
+              <input type="number" step="0.01" placeholder="1955.50" value={formData.price} onChange={(e) => setFormData({ ...formData, price: e.target.value })} className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white" />
             </div>
           </div>
-
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
             <div>
               <label className="block text-sm font-medium mb-2">Stop Loss</label>
-              <input
-                type="number"
-                step="0.01"
-                placeholder="1920"
-                value={formData.stopLoss}
-                onChange={(e) => setFormData({ ...formData, stopLoss: e.target.value })}
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white"
-              />
+              <input type="number" step="0.01" placeholder="1920" value={formData.stopLoss} onChange={(e) => setFormData({ ...formData, stopLoss: e.target.value })} className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white" />
             </div>
             <div>
               <label className="block text-sm font-medium mb-2">Take Profit</label>
-              <input
-                type="number"
-                step="0.01"
-                placeholder="1985"
-                value={formData.takeProfit}
-                onChange={(e) => setFormData({ ...formData, takeProfit: e.target.value })}
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white"
-              />
+              <input type="number" step="0.01" placeholder="1985" value={formData.takeProfit} onChange={(e) => setFormData({ ...formData, takeProfit: e.target.value })} className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white" />
             </div>
           </div>
-
-          <button type="submit" className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 rounded">
-            Place Order
-          </button>
+          <button type="submit" className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 rounded">Place Order</button>
         </form>
       </section>
 
@@ -275,36 +209,20 @@ export function TradingPage() {
               <tbody>
                 {orders.slice(0, 10).map((order) => (
                   <tr key={order.id} className="border-b border-gray-800 hover:bg-gray-800/60">
-                    <td className="px-4 py-3 text-sm">
-                      {order.timestamp ? new Date(order.timestamp).toLocaleDateString() : ''}
-                    </td>
+                    <td className="px-4 py-3 text-sm">{order.timestamp ? new Date(order.timestamp).toLocaleDateString() : ''}</td>
                     <td className="px-4 py-3 font-semibold">{order.symbol}</td>
-                    <td className={`px-4 py-3 ${order.side === 'buy' ? 'text-green-400' : 'text-red-400'}`}>
-                      {order.side === 'buy' ? 'Buy' : 'Sell'}
-                    </td>
+                    <td className={`px-4 py-3 ${order.side === 'buy' ? 'text-green-400' : 'text-red-400'}`}>{order.side === 'buy' ? 'Buy' : 'Sell'}</td>
                     <td className="px-4 py-3 text-right">{order.qty}</td>
                     <td className="px-4 py-3 text-right">₹{Number(order.price).toFixed(2)}</td>
-                    <td
-                      className={`px-4 py-3 text-sm ${
-                        order.status === 'filled'
-                          ? 'text-green-400'
-                          : order.status === 'partial'
-                            ? 'text-yellow-400'
-                            : 'text-gray-400'
-                      }`}
-                    >
-                      {String(order.status || '').toUpperCase()}
-                    </td>
+                    <td className={`px-4 py-3 text-sm ${order.status === 'filled' ? 'text-green-400' : order.status === 'partial' ? 'text-yellow-400' : 'text-gray-400'}`}>{String(order.status || '').toUpperCase()}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-
           {orders.length === 0 && <div className="p-6 text-center text-gray-400">No orders yet</div>}
         </div>
       </section>
     </div>
   );
 }
-

@@ -1,8 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { api } from '../api';
-
-const API_URL = '';
+import { apiFetch, api } from '../api';
 
 interface Strategy {
   id: string;
@@ -50,7 +48,6 @@ export function StrategiesPage() {
   const [pineScript, setPineScript] = useState('');
   const [pineError, setPineError] = useState<string | null>(null);
 
-  // Hermes state
   const [hermesGenerating, setHermesGenerating] = useState(false);
   const [hermesGenerateResult, setHermesGenerateResult] = useState<any>(null);
   const [hermesGenerateError, setHermesGenerateError] = useState<string | null>(null);
@@ -63,7 +60,6 @@ export function StrategiesPage() {
   const [hermesAutoGenerating, setHermesAutoGenerating] = useState(false);
   const [hermesStatus, setHermesStatus] = useState<any>(null);
 
-  // Generate form state
   const [showGenerateForm, setShowGenerateForm] = useState(false);
   const [generateSymbol, setGenerateSymbol] = useState('INFY');
   const [generateTimeframe, setGenerateTimeframe] = useState('1d');
@@ -73,19 +69,9 @@ export function StrategiesPage() {
     fetchHermesStatus();
   }, []);
 
-  const safeJson = async (res: Response) => {
-    const text = await res.text();
-    try {
-      return text ? JSON.parse(text) : {};
-    } catch {
-      return { raw: text };
-    }
-  };
-
   const fetchStrategies = async () => {
     try {
-      const res = await fetch(`${API_URL}/strategies`);
-      const data = await safeJson(res);
+      const data = await apiFetch('/strategies');
       const list = Array.isArray(data) ? (data as Strategy[]) : [];
       setStrategies(list);
       setSelected(list[0] || null);
@@ -98,8 +84,7 @@ export function StrategiesPage() {
 
   const fetchHermesStatus = async () => {
     try {
-      const res = await fetch(`${API_URL}/strategy/hermes/status`);
-      const data = await safeJson(res);
+      const data = await apiFetch('/strategy/hermes/status');
       setHermesStatus(data);
     } catch (error) {
       console.error('Error fetching Hermes status:', error);
@@ -111,7 +96,6 @@ export function StrategiesPage() {
   }, [strategies]);
 
   const handleDelete = async (id: string) => {
-    // eslint-disable-next-line no-restricted-globals
     if (!confirm('Delete this strategy?')) return;
     try {
       await api.delete(`/strategy/${encodeURIComponent(id)}`);
@@ -156,13 +140,11 @@ export function StrategiesPage() {
     setPineLoading(true);
     setPineScript('');
     try {
-      const res = await fetch(`${API_URL}/strategy/pinescript/generate`, {
+      const data = await apiFetch('/strategy/pinescript/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: `${selected.name} (${selected.symbol})` }),
       });
-      const data = await safeJson(res);
-      if (!res.ok) throw new Error(String(data?.detail || data?.raw || `HTTP ${res.status}`));
       setPineScript(String(data?.script || ''));
     } catch (e: any) {
       setPineError(e?.message || 'Failed to generate PineScript');
@@ -171,20 +153,16 @@ export function StrategiesPage() {
     }
   };
 
-  // ── Hermes Actions ──────────────────────────────────────────────────────
-
   const hermesGenerate = async () => {
     setHermesGenerating(true);
     setHermesGenerateResult(null);
     setHermesGenerateError(null);
     try {
-      const res = await fetch(`${API_URL}/strategy/generate`, {
+      const data = await apiFetch('/strategy/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ symbol: generateSymbol, timeframe: generateTimeframe }),
       });
-      const data = await safeJson(res);
-      if (!res.ok) throw new Error(String(data?.detail || data?.raw || `HTTP ${res.status}`));
       setHermesGenerateResult(data);
       setShowGenerateForm(false);
       await fetchStrategies();
@@ -199,11 +177,7 @@ export function StrategiesPage() {
     setHermesValidating(true);
     setHermesValidation(null);
     try {
-      const res = await fetch(`${API_URL}/strategy/validate/${encodeURIComponent(strategyId)}`, {
-        method: 'POST',
-      });
-      const data = await safeJson(res);
-      if (!res.ok) throw new Error(String(data?.detail || data?.raw || `HTTP ${res.status}`));
+      const data = await apiFetch(`/strategy/validate/${encodeURIComponent(strategyId)}`, { method: 'POST' });
       setHermesValidation(data?.validation || null);
     } catch (e: any) {
       console.error('Validation error:', e);
@@ -216,11 +190,7 @@ export function StrategiesPage() {
     setHermesTuning(true);
     setHermesSuggestion(null);
     try {
-      const res = await fetch(`${API_URL}/strategy/tune/${encodeURIComponent(strategyId)}`, {
-        method: 'POST',
-      });
-      const data = await safeJson(res);
-      if (!res.ok) throw new Error(String(data?.detail || data?.raw || `HTTP ${res.status}`));
+      const data = await apiFetch(`/strategy/tune/${encodeURIComponent(strategyId)}`, { method: 'POST' });
       setHermesSuggestion(data?.suggestion || null);
     } catch (e: any) {
       console.error('Tune error:', e);
@@ -233,9 +203,7 @@ export function StrategiesPage() {
     setHermesExplaining(true);
     setHermesExplanation(null);
     try {
-      const res = await fetch(`${API_URL}/strategy/explain/${encodeURIComponent(strategyId)}`);
-      const data = await safeJson(res);
-      if (!res.ok) throw new Error(String(data?.detail || data?.raw || `HTTP ${res.status}`));
+      const data = await apiFetch(`/strategy/explain/${encodeURIComponent(strategyId)}`);
       setHermesExplanation(data?.explanation || 'No explanation available');
     } catch (e: any) {
       console.error('Explain error:', e);
@@ -247,9 +215,7 @@ export function StrategiesPage() {
   const hermesAutoGenerate = async () => {
     setHermesAutoGenerating(true);
     try {
-      const res = await fetch(`${API_URL}/strategy/auto-generate`, { method: 'POST' });
-      const data = await safeJson(res);
-      if (!res.ok) throw new Error(String(data?.detail || data?.raw || `HTTP ${res.status}`));
+      const data = await apiFetch('/strategy/auto-generate', { method: 'POST' });
       alert(data?.message || 'Auto-generation triggered');
       await fetchStrategies();
     } catch (e: any) {
@@ -258,8 +224,6 @@ export function StrategiesPage() {
       setHermesAutoGenerating(false);
     }
   };
-
-  // ── Render ──────────────────────────────────────────────────────────────
 
   return (
     <div className="p-6 bg-black text-white">
@@ -288,7 +252,6 @@ export function StrategiesPage() {
         </div>
       </div>
 
-      {/* Hermes Status Banner */}
       {hermesStatus && (
         <div className={`mb-4 p-3 rounded text-sm ${hermesStatus.hermes_available ? 'bg-green-900/50 text-green-400' : 'bg-yellow-900/50 text-yellow-400'}`}>
           Hermes: {hermesStatus.hermes_available ? 'Connected' : 'Offline (fallback mode)'}
@@ -296,7 +259,6 @@ export function StrategiesPage() {
         </div>
       )}
 
-      {/* Generate with Hermes Form */}
       {showGenerateForm ? (
         <div className="mb-8 bg-purple-900/30 border border-purple-700 rounded-lg p-4">
           <h3 className="text-lg font-semibold mb-4 text-purple-400">Generate Strategy with Hermes AI</h3>
@@ -350,7 +312,6 @@ export function StrategiesPage() {
         </div>
       ) : null}
 
-      {/* New Strategy Form */}
       {showNewForm ? (
         <form onSubmit={handleCreate} className="mb-8 bg-gray-900 border border-gray-800 rounded-lg p-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -527,7 +488,6 @@ export function StrategiesPage() {
             </ResponsiveContainer>
           </div>
 
-          {/* Hermes Actions */}
           <div className="bg-gray-900 p-4 rounded mb-6">
             <h3 className="text-lg font-semibold mb-4">Hermes AI Actions</h3>
             <div className="flex flex-wrap gap-3 mb-4">
@@ -554,7 +514,6 @@ export function StrategiesPage() {
               </button>
             </div>
 
-            {/* Validation Result */}
             {hermesValidation && (
               <div className="bg-gray-800 rounded p-3 mb-3">
                 <div className="flex items-center gap-3 mb-2">
@@ -576,7 +535,6 @@ export function StrategiesPage() {
               </div>
             )}
 
-            {/* Tuning Suggestion */}
             {hermesSuggestion && (
               <div className="bg-gray-800 rounded p-3 mb-3">
                 <p className="text-sm font-semibold text-orange-400 mb-1">Suggested Change</p>
@@ -588,7 +546,6 @@ export function StrategiesPage() {
               </div>
             )}
 
-            {/* Explanation */}
             {hermesExplanation && (
               <div className="bg-gray-800 rounded p-3">
                 <p className="text-sm font-semibold text-cyan-400 mb-1">Strategy Explanation</p>

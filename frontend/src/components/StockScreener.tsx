@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-
-const API_URL = '';
+import { apiFetch } from '../api';
 
 interface ScreenerResult {
   rank: number;
@@ -22,19 +21,9 @@ export function StockScreenerPage() {
     return () => clearInterval(interval);
   }, []);
 
-  const safeJson = async (res: Response) => {
-    const text = await res.text();
-    try {
-      return text ? JSON.parse(text) : {};
-    } catch {
-      return { raw: text };
-    }
-  };
-
   const fetchScreenerResults = async () => {
     try {
-      const res = await fetch(`${API_URL}/screener`);
-      const data = await safeJson(res);
+      const data = await apiFetch('/screener');
       setResults(Array.isArray(data) ? data : []);
     } catch (error) {
       console.error('Error fetching screener:', error);
@@ -45,12 +34,9 @@ export function StockScreenerPage() {
 
   const signalColor = (signal: string) => {
     switch (signal) {
-      case 'buy':
-        return 'text-green-400 bg-green-900';
-      case 'sell':
-        return 'text-red-400 bg-red-900';
-      default:
-        return 'text-gray-300 bg-gray-800';
+      case 'buy': return 'text-green-400 bg-green-900';
+      case 'sell': return 'text-red-400 bg-red-900';
+      default: return 'text-gray-300 bg-gray-800';
     }
   };
 
@@ -105,12 +91,10 @@ export function StockScreenerPage() {
                   <td className="px-4 py-3 font-bold">{result.symbol}</td>
                   <td className="px-4 py-3 text-right">₹{Number(result.price).toFixed(2)}</td>
                   <td className={`px-4 py-3 text-right ${result.change_pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                    {result.change_pct >= 0 ? '+' : ''}
-                    {Number(result.change_pct).toFixed(2)}%
+                    {result.change_pct >= 0 ? '+' : ''}{Number(result.change_pct).toFixed(2)}%
                   </td>
                   <td className={`px-4 py-3 text-right ${result.pnl_pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                    {result.pnl_pct >= 0 ? '+' : ''}
-                    {Number(result.pnl_pct).toFixed(2)}%
+                    {result.pnl_pct >= 0 ? '+' : ''}{Number(result.pnl_pct).toFixed(2)}%
                   </td>
                   <td className="px-4 py-3">
                     <span className={`px-2 py-1 rounded text-sm font-semibold ${signalColor(result.signal)}`}>
@@ -126,7 +110,6 @@ export function StockScreenerPage() {
             </tbody>
           </table>
         </div>
-
         {results.length === 0 && !loading ? (
           <div className="p-6 text-center text-gray-400">No screener results</div>
         ) : null}
@@ -135,5 +118,4 @@ export function StockScreenerPage() {
   );
 }
 
-// Back-compat for existing import in App.tsx
 export const StockScreener = StockScreenerPage;

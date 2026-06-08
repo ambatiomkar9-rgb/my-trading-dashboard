@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from 'react';
-
-const API_URL = '';
+import { apiFetch } from '../api';
 
 type Portfolio = {
   total_value: number;
@@ -13,20 +12,10 @@ export function PortfolioPage() {
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const safeJson = async (res: Response) => {
-    const text = await res.text();
-    try {
-      return text ? JSON.parse(text) : {};
-    } catch {
-      return { raw: text };
-    }
-  };
-
   const refresh = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${API_URL}/api/portfolio`);
-      const data = await safeJson(res);
+      const data = await apiFetch('/api/portfolio');
       setPortfolio(data && typeof data === 'object' ? (data as Portfolio) : null);
     } finally {
       setLoading(false);
@@ -60,15 +49,13 @@ export function PortfolioPage() {
         <div className="bg-gray-900 border border-gray-800 rounded p-4">
           <div className="text-gray-400 text-sm">PnL</div>
           <div className={`text-2xl font-bold ${(portfolio?.total_pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-            {(portfolio?.total_pnl || 0) >= 0 ? '+' : ''}
-            {Number(portfolio?.total_pnl || 0).toFixed(0)}
+            {(portfolio?.total_pnl || 0) >= 0 ? '+' : ''}{Number(portfolio?.total_pnl || 0).toFixed(0)}
           </div>
         </div>
         <div className="bg-gray-900 border border-gray-800 rounded p-4">
           <div className="text-gray-400 text-sm">PnL %</div>
           <div className={`text-2xl font-bold ${(portfolio?.total_pnl_pct || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-            {(portfolio?.total_pnl_pct || 0) >= 0 ? '+' : ''}
-            {Number(portfolio?.total_pnl_pct || 0).toFixed(2)}%
+            {(portfolio?.total_pnl_pct || 0) >= 0 ? '+' : ''}{Number(portfolio?.total_pnl_pct || 0).toFixed(2)}%
           </div>
         </div>
       </div>

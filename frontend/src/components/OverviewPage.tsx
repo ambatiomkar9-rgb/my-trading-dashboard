@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-
-const API_URL = '';
+import { apiFetch } from '../api';
 
 type Portfolio = {
   total_value: number;
@@ -45,31 +44,21 @@ export function OverviewPage() {
   const [health, setHealth] = useState<SystemHealth | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const safeJson = async (res: Response) => {
-    const text = await res.text();
-    try {
-      return text ? JSON.parse(text) : {};
-    } catch {
-      return { raw: text };
-    }
-  };
-
   const refresh = async () => {
     setLoading(true);
     try {
       const safeFetch = async (url: string) => {
         try {
-          const res = await fetch(url);
-          return await safeJson(res);
+          return await apiFetch(url);
         } catch {
           return {};
         }
       };
       const [w, s, p, h] = await Promise.all([
-        safeFetch(`${API_URL}/api/watchlist`),
-        safeFetch(`${API_URL}/api/signals/pending`),
-        safeFetch(`${API_URL}/api/portfolio`),
-        safeFetch(`${API_URL}/api/system/health`),
+        safeFetch('/api/watchlist'),
+        safeFetch('/api/signals/pending'),
+        safeFetch('/api/portfolio'),
+        safeFetch('/api/system/health'),
       ]);
       setWatchlist(Array.isArray(w) ? w : []);
       setSignals(Array.isArray(s) ? s : []);
@@ -86,7 +75,6 @@ export function OverviewPage() {
     refresh();
     const t = setInterval(refresh, 10000);
     return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const metrics = useMemo(() => {
