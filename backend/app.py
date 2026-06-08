@@ -798,11 +798,11 @@ async def _build_agent_cards(app: FastAPI) -> list[dict[str, Any]]:
         strategies = session.query(Strategy).order_by(Strategy.name.asc()).all()
 
     total_strategies, running_strategies = _strategy_summary(strategies)
-    boss_task = "Chat assistant ready"
+    boss_task = "Boss agent ready (12 tools)"
     if cfg.ollama_url:
-        boss_task = f"Chat assistant ready ({cfg.ollama_model})"
+        boss_task = f"Boss agent ready ({cfg.ollama_model}, 12 tools)"
     else:
-        boss_task = "Chat assistant ready (fallback mode)"
+        boss_task = "Boss agent ready (fallback mode)"
 
     cards: list[dict[str, Any]] = [
         {
@@ -902,58 +902,27 @@ async def _build_agent_cards(app: FastAPI) -> list[dict[str, Any]]:
     return cards
 
 
-async def _process_chat_command(app: FastAPI, command_id: str, message: str) -> None:
+async def _process_chat_command(app: FastAPI, command_id: str, message: str, token: str = "") -> None:
     try:
+        from backend.agents.boss_agent import BossAgent, ToolContext
+
         cfg = load_tooling_config()
         runtime: TradingSystemRuntime | None = getattr(app.state, "runtime", None)
-        portfolio = _portfolio_summary(runtime) if runtime is not None else {}
-        watchlist = []
-        if runtime is not None:
-            watchlist = runtime.status().get("watchlist_symbols", [])
-        system_prompt = (
-            "You are the boss agent for a trading dashboard. "
-            "Be concise, factual, and helpful. "
-            f"Trading mode: {runtime.trading_mode if runtime else 'paper'}. "
-            f"Watchlist: {watchlist}. "
-            f"Portfolio: {portfolio}."
+
+        ctx = ToolContext(
+            base_url=f"http://127.0.0.1:{os.getenv('PORT', '8000')}",
+            token=token,
+            runtime=runtime,
         )
-        reply = ""
-        from backend.infra.circuit_breaker import get_breaker
-        ollama_br = get_breaker("ollama", failure_threshold=3, recovery_timeout=30)
-        if not ollama_br.allow_request():
-            logger.warning("Ollama circuit breaker OPEN — using fallback reply")
-        else:
-            async with httpx.AsyncClient(timeout=20, trust_env=False) as client:
-                try:
-                    response = await client.post(
-                        f"{cfg.ollama_url.rstrip('/')}/api/chat",
-                        json={
-                            "model": cfg.ollama_model,
-                            "messages": [
-                                {"role": "system", "content": system_prompt},
-                                {"role": "user", "content": message},
-                            ],
-                            "stream": False,
-                        },
-                    )
-                    response.raise_for_status()
-                    payload = response.json()
-                    reply = (
-                        payload.get("message", {}).get("content")
-                        or payload.get("response")
-                        or ""
-                    )
-                    ollama_br.record_success()
-                except Exception as exc:  # noqa: BLE001
-                    ollama_br.record_failure()
-                    logger.warning("Ollama chat failed, using fallback: %s", exc)
+        boss = BossAgent(
+            ollama_url=cfg.ollama_url,
+            ollama_model=cfg.ollama_model,
+            ctx=ctx,
+        )
+        reply = await boss.process(message)
 
         if not reply:
-            reply = (
-                f"Chat received: {message}. "
-                f"Runtime mode: {runtime.trading_mode if runtime else 'paper'}. "
-                f"Watchlist count: {len(watchlist)}."
-            )
+            reply = f"I received your message but couldn't generate a response right now. Try again in a moment."
 
         session = SessionLocal()
         try:
@@ -1353,6 +1322,52 @@ if FRONTEND_DIST.exists():
 async def health() -> dict[str, Any]:
     """Simple uptime probe for Render / UptimeRobot."""
     return build_health_snapshot("trading-dashboard", "ok")
+
+
+@app.get("/api/market-data/{symbol}")
+async def get_market_data(symbol: str, user: dict = Depends(verify_token)) -> dict[str, Any]:  # noqa: B008
+    """Get current price and recent market data for a symbol."""
+    symbol = symbol.upper().strip()
+    try:
+        from backend.market_data.yfinance_client import (
+            compute_technical_indicators,
+            fetch_current_price,
+            fetch_ohlcv,
+        )
+        price = await asyncio.to_thread(fetch_current_price, symbol)
+        df = await asyncio.to_thread(fetch_ohlcv, symbol, "1d", period="3mo")
+        result: dict[str, Any] = {"symbol": symbol, "ltp": price, "current_price": price}
+        if df is not None and not df.empty:
+            df = compute_technical_indicators(df)
+            if df is not None and not df.empty:
+                latest = df.iloc[-1]
+                trend = "bullish" if latest.get("ema_fast", 0) > latest.get("ema_slow", 0) else "bearish"
+                result.update({
+                    "trend": trend,
+                    "rsi": round(float(latest.get("rsi", 50)), 2),
+                    "macd": round(float(latest.get("macd", 0)), 4),
+                    "volume": int(latest.get("volume", 0)),
+                    "ema_fast": round(float(latest.get("ema_fast", 0)), 2),
+                    "ema_slow": round(float(latest.get("ema_slow", 0)), 2),
+                })
+        return result
+    except Exception as exc:
+        logger.warning("Market data fetch failed for %s: %s", symbol, exc)
+        return {"symbol": symbol, "error": str(exc)}
+
+
+@app.get("/api/news/{symbol}")
+async def get_news(symbol: str, user: dict = Depends(verify_token)) -> dict[str, Any]:  # noqa: B008
+    """Get recent news and sentiment for a symbol."""
+    symbol = symbol.upper().strip()
+    try:
+        from backend.agents.news_sentiment_agent import NewsSentimentAgent
+        agent = NewsSentimentAgent()
+        result = await agent.analyze(symbol)
+        return {"symbol": symbol, "news": result}
+    except Exception as exc:
+        logger.warning("News fetch failed for %s: %s", symbol, exc)
+        return {"symbol": symbol, "news": [], "error": str(exc)}
 
 
 @app.get("/api/system/health")
@@ -2563,7 +2578,7 @@ async def chat(
     user: dict = Depends(verify_token),  # noqa: B008
     _rl: None = Depends(rate_limit("chat", 10, 60)),  # noqa: B008
 ) -> dict[str, Any]:
-    """Queue a chat command for the Ollama-backed boss agent."""
+    """Queue a chat command for the boss agent."""
     message = payload.message.strip()
     if not message:
         raise HTTPException(status_code=400, detail="Message is required")
@@ -2578,7 +2593,9 @@ async def chat(
     with db_session() as session:
         session.add(ChatHistory(user_id="user", role="user", message=message, timestamp=_utc_now()))
         session.commit()
-    asyncio.create_task(_process_chat_command(request.app, command_id, message))
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else ""
+    asyncio.create_task(_process_chat_command(request.app, command_id, message, token))
     return {"command_id": command_id, "status": "running"}
 
 
@@ -2586,6 +2603,25 @@ async def chat(
 async def chat_response(command_id: str, request: Request) -> dict[str, Any]:
     """Poll a queued chat response."""
     return request.app.state.chat_commands.get(command_id, {"status": "pending", "response": None})
+
+
+@app.get("/chat/history")
+async def chat_history(
+    limit: int = 50,
+    user: dict = Depends(verify_token),  # noqa: B008
+) -> list[dict[str, Any]]:
+    """Return recent chat history."""
+    with db_session() as session:
+        rows = (
+            session.query(ChatHistory)
+            .order_by(ChatHistory.id.desc())
+            .limit(limit)
+            .all()
+        )
+        return [
+            {"role": r.role, "message": r.message, "timestamp": r.timestamp}
+            for r in reversed(rows)
+        ]
 
 
 @app.get("/{path:path}", include_in_schema=False)
