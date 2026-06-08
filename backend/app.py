@@ -1645,7 +1645,7 @@ async def broker_callback(code: str | None = None, state: str | None = None) -> 
 
 
 @app.get("/api/broker/upstox/status")
-async def broker_status(request: Request) -> dict[str, Any]:
+async def broker_status(request: Request, user: dict = Depends(verify_token)) -> dict[str, Any]:  # noqa: B008
     """Return broker authentication and mode details."""
     runtime = _runtime(request)
     auth = BrokerAuthManager("upstox")

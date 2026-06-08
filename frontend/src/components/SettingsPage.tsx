@@ -42,6 +42,7 @@ export function SettingsPage() {
   const [killEnabled, setKillEnabled] = useState<boolean | null>(null);
   const [adminKey, setAdminKey] = useState<string>(() => localStorage.getItem('admin_api_key') || '');
   const [killBusy, setKillBusy] = useState(false);
+  const [brokerStatus, setBrokerStatus] = useState<any>(null);
 
   useEffect(() => {
     (async () => {
@@ -55,6 +56,11 @@ export function SettingsPage() {
         if (typeof ksData?.trading_enabled === 'boolean') {
           setKillEnabled(ksData.trading_enabled);
         }
+
+        try {
+          const bs = await api.get('/api/broker/upstox/status');
+          setBrokerStatus(bs);
+        } catch { /* ignore */ }
       } catch {
         // ignore; keep defaults
       } finally {
@@ -140,6 +146,38 @@ export function SettingsPage() {
           <div>
             <label className="block text-sm mb-2">API Secret</label>
             <input type="password" value={settings.api_secret || ''} onChange={(e) => setSettings({ ...settings, api_secret: e.target.value })} className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2" placeholder="***masked***" />
+          </div>
+        </div>
+      </section>
+
+      <section className="mb-8 bg-gray-900 p-6 rounded-lg">
+        <h2 className="text-xl font-bold mb-4">Broker Connection</h2>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+          <div>
+            <div className="text-sm text-gray-400 mb-1">Status</div>
+            <div className={`font-semibold ${brokerStatus?.authenticated ? 'text-green-400' : 'text-yellow-400'}`}>
+              {brokerStatus?.authenticated ? 'Connected' : 'Not Connected'}
+            </div>
+          </div>
+          <div>
+            <div className="text-sm text-gray-400 mb-1">Mode</div>
+            <div className="font-semibold">
+              {brokerStatus?.broker_mode || 'paper'}
+              {brokerStatus?.trading_mode === 'live' && <span className="text-red-400 ml-2">LIVE</span>}
+            </div>
+          </div>
+        </div>
+        <div className="flex gap-3">
+          <a
+            href="/broker-login"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded font-semibold text-sm"
+          >
+            {brokerStatus?.authenticated ? 'Re-authenticate' : 'Connect to Upstox'}
+          </a>
+          <div className="text-xs text-gray-500 flex items-center">
+            Opens Upstox login in a new tab. After authorizing, you'll be redirected back automatically.
           </div>
         </div>
       </section>
