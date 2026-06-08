@@ -1,5 +1,6 @@
-import React, { Component, useState } from 'react';
+import React, { Component, useState, useEffect } from 'react';
 import { AuthProvider, useAuth } from './auth/AuthContext';
+import { apiFetch } from './api';
 
 class ErrorBoundary extends Component<{children: React.ReactNode}, {hasError: boolean; error: string}> {
   constructor(props: {children: React.ReactNode}) {
@@ -12,13 +13,11 @@ class ErrorBoundary extends Component<{children: React.ReactNode}, {hasError: bo
   render() {
     if (this.state.hasError) {
       return (
-        <div className="flex items-center justify-center h-screen bg-black text-white">
-          <div className="text-center p-8 bg-gray-950 border border-red-800 rounded-lg max-w-md">
-            <h2 className="text-xl font-bold text-red-400 mb-2">Something went wrong</h2>
-            <p className="text-gray-400 text-sm mb-4">{this.state.error}</p>
-            <button onClick={() => window.location.reload()} className="px-4 py-2 bg-blue-600 rounded hover:bg-blue-700">
-              Reload Page
-            </button>
+        <div className="flex items-center justify-center h-screen" style={{background:'var(--bg)'}}>
+          <div className="text-center p-8 modal-box max-w-md">
+            <h2 className="text-xl font-bold text-red mb-2">Something went wrong</h2>
+            <p className="text-muted text-sm mb-4">{this.state.error}</p>
+            <button onClick={() => window.location.reload()} className="btn btn-accent">Reload Page</button>
           </div>
         </div>
       );
@@ -58,16 +57,71 @@ type Page =
   | 'live-status'
   | 'broker-recon';
 
+const NAV_ITEMS: { page: Page; label: string; icon: string }[] = [
+  { page: 'overview', label: 'Overview', icon: '◈' },
+  { page: 'chat', label: 'Chat', icon: '◆' },
+  { page: 'watchlist', label: 'Watchlist', icon: '◉' },
+  { page: 'signals', label: 'Signals', icon: '◎' },
+  { page: 'portfolio', label: 'Portfolio', icon: '◇' },
+  { page: 'trading', label: 'Trading', icon: '⬡' },
+  { page: 'strategies', label: 'Strategies', icon: '⬢' },
+  { page: 'backtesting', label: 'Backtest', icon: 'triangle' },
+  { page: 'screener', label: 'Screener', icon: '▣' },
+  { page: 'performance', label: 'Performance', icon: '▤' },
+  { page: 'settings', label: 'Settings', icon: '⚙' },
+];
+
+function LiveTicker() {
+  const [prices, setPrices] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    const fetchPrices = async () => {
+      try {
+        const data = await apiFetch('/api/watchlist');
+        if (Array.isArray(data)) {
+          const p: Record<string, number> = {};
+          for (const item of data) {
+            if (item.symbol && item.last_signal_price) {
+              p[item.symbol] = item.last_signal_price;
+            }
+          }
+          setPrices(p);
+        }
+      } catch { /* ignore */ }
+    };
+    fetchPrices();
+    const t = setInterval(fetchPrices, 15000);
+    return () => clearInterval(t);
+  }, []);
+
+  const entries = Object.entries(prices);
+  if (entries.length === 0) return null;
+
+  return (
+    <div className="ticker-bar">
+      <div className="ticker-scroll">
+        {[...entries, ...entries].map(([sym, price], i) => (
+          <span key={i} className="ticker-item">
+            <span className="ticker-symbol">{sym}</span>
+            <span className="ticker-price">₹{price.toFixed(2)}</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function DashboardContent() {
   const [page, setPage] = useState<Page>('overview');
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const { isAuthenticated, loading, username, logout } = useAuth();
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-screen bg-black text-white">
+      <div className="flex items-center justify-center h-screen" style={{background:'var(--bg)'}}>
         <div className="text-center">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mx-auto mb-4" />
-          <p className="text-gray-400">Loading...</p>
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-accent mx-auto mb-4" style={{borderColor:'var(--accent)'}} />
+          <p className="text-muted">Loading...</p>
         </div>
       </div>
     );
@@ -92,66 +146,84 @@ function DashboardContent() {
       case 'portfolio': return <PortfolioPage />;
       case 'live-status': return <LiveStatusPanel />;
       case 'broker-recon': return <BrokerReconciliation />;
-      default:
-        return <ChatInterface />;
+      default: return <ChatInterface />;
     }
   };
 
   return (
-    <div className="min-h-screen bg-black text-white grid grid-cols-1 lg:grid-cols-[280px_1fr]">
-      <aside className="border-r border-gray-900 p-4">
-        <div className="flex items-center justify-between mb-3">
-          <span className="text-lg font-bold">Trading Dashboard</span>
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-gray-500">{username}</span>
-            <button onClick={logout} className="text-xs text-red-400 hover:text-red-300">Logout</button>
+    <div className="app-layout">
+      <div className="scanline-overlay" />
+
+      {/* Mobile header */}
+      <header className="mobile-header lg:hidden">
+        <button onClick={() => setSidebarOpen(!sidebarOpen)} className="btn btn-ghost" style={{padding:'4px 8px'}}>
+          ☰
+        </button>
+        <span className="font-bold" style={{color:'var(--accent)'}}>Trading Dashboard</span>
+        <div className="flex items-center gap-2">
+          <span className="text-muted" style={{fontSize:10}}>{username}</span>
+          <button onClick={logout} className="btn btn-ghost" style={{padding:'2px 6px',fontSize:10}}>Exit</button>
+        </div>
+      </header>
+
+      {/* Sidebar overlay on mobile */}
+      {sidebarOpen && (
+        <div className="sidebar-overlay lg:hidden" onClick={() => setSidebarOpen(false)} />
+      )}
+
+      {/* Sidebar */}
+      <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
+        <div className="sidebar-header">
+          <div>
+            <div className="sidebar-logo">◈ Trading Dashboard</div>
+            <div className="sidebar-subtitle">{username}</div>
+          </div>
+          <button onClick={logout} className="btn btn-ghost" style={{fontSize:10,padding:'2px 6px'}}>Exit</button>
+        </div>
+
+        <div className="sidebar-nav">
+          {NAV_ITEMS.map((item) => (
+            <button
+              key={item.page}
+              onClick={() => { setPage(item.page); setSidebarOpen(false); }}
+              className={`nav-item ${page === item.page ? 'active' : ''}`}
+            >
+              <span className="nav-icon">{item.icon}</span>
+              <span>{item.label}</span>
+            </button>
+          ))}
+        </div>
+
+        <div className="sidebar-section">
+          <div className="panel-header">Agents</div>
+          <div className="sidebar-agents">
+            <AgentMonitor />
           </div>
         </div>
-        <AgentMonitor />
-        <div className="h-px bg-gray-800 my-4" />
-        <div className="space-y-2">
-          {(
-            [
-              'overview',
-              'chat',
-              'watchlist',
-              'signals',
-              'portfolio',
-              'trading',
-              'strategies',
-              'backtesting',
-              'screener',
-              'performance',
-              'settings',
-            ] as Page[]
-          ).map((p) => (
-            <button
-              key={p}
-              onClick={() => setPage(p)}
-              className={`w-full text-left px-3 py-2 rounded font-semibold ${
-                page === p ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-900 hover:bg-gray-800'
-              }`}
-            >
-              {p}
-            </button>
-          ))}
-        </div>
-        <div className="h-px bg-gray-800 my-4" />
-        <div className="space-y-2">
-          {(['live-status', 'broker-recon'] as Page[]).map((p) => (
-            <button
-              key={p}
-              onClick={() => setPage(p)}
-              className={`w-full text-left px-3 py-2 rounded font-semibold text-xs uppercase tracking-wide ${
-                page === p ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-900 hover:bg-gray-800'
-              }`}
-            >
-              {p === 'live-status' ? 'Live Status' : 'Broker Recon'}
-            </button>
-          ))}
+
+        <div className="sidebar-footer">
+          <button
+            onClick={() => { setPage('live-status' as Page); setSidebarOpen(false); }}
+            className={`nav-item text-xs ${page === 'live-status' ? 'active' : ''}`}
+          >
+            <span className="nav-icon">▪</span> Live Status
+          </button>
+          <button
+            onClick={() => { setPage('broker-recon' as Page); setSidebarOpen(false); }}
+            className={`nav-item text-xs ${page === 'broker-recon' ? 'active' : ''}`}
+          >
+            <span className="nav-icon">▫</span> Broker Recon
+          </button>
         </div>
       </aside>
-      <main className="min-w-0">{renderPage()}</main>
+
+      {/* Main content */}
+      <main className="main-content">
+        <LiveTicker />
+        <div className="page-content">
+          {renderPage()}
+        </div>
+      </main>
     </div>
   );
 }
@@ -180,41 +252,44 @@ function LoginPage() {
   };
 
   return (
-    <div className="flex items-center justify-center h-screen bg-black text-white">
-      <div className="bg-gray-950 border border-gray-800 rounded-lg p-8 w-full max-w-sm">
-        <h1 className="text-xl font-bold mb-6 text-center">Trading Dashboard Login</h1>
+    <div className="flex items-center justify-center h-screen" style={{background:'var(--bg)'}}>
+      <div className="modal-box p-8 w-full max-w-sm">
+        <h1 className="text-xl font-bold mb-6 text-center" style={{color:'var(--accent)'}}>
+          ◈ Trading Dashboard
+        </h1>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-sm text-gray-400 mb-1">Username</label>
+            <label className="block text-sm mb-1" style={{color:'var(--text-muted)'}}>Username</label>
             <input
               type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500"
+              className="input"
               required
               autoFocus
             />
           </div>
           <div>
-            <label className="block text-sm text-gray-400 mb-1">Password</label>
+            <label className="block text-sm mb-1" style={{color:'var(--text-muted)'}}>Password</label>
             <input
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500"
+              className="input"
               required
             />
           </div>
-          {error && <p className="text-red-400 text-sm">{error}</p>}
+          {error && <p className="text-red text-sm">{error}</p>}
           <button
             type="submit"
             disabled={loading}
-            className="w-full px-4 py-2 bg-blue-600 rounded hover:bg-blue-700 disabled:opacity-50 font-medium"
+            className="btn btn-accent w-full"
+            style={{padding:'8px 16px'}}
           >
-            {loading ? 'Logging in...' : 'Login'}
+            {loading ? '...' : 'Login'}
           </button>
         </form>
-        <p className="text-xs text-gray-600 mt-4 text-center">Contact admin for credentials</p>
+        <p className="text-muted mt-4 text-center" style={{fontSize:10}}>Contact admin for credentials</p>
       </div>
     </div>
   );
