@@ -124,9 +124,11 @@ def ensure_default_admin() -> None:
     _ensure_table()
     session = SessionLocal()
     try:
-        count = session.query(User).count()
-        if count == 0:
-            admin_pw = os.getenv("ADMIN_PASSWORD", "").strip()
+        admin_pw = os.getenv("ADMIN_PASSWORD", "").strip()
+        row = session.query(User).filter(User.username == "admin").first()
+
+        if not row:
+            # No admin exists — create one
             if not admin_pw:
                 admin_pw = secrets.token_urlsafe(16)
                 logger.warning(
@@ -134,8 +136,18 @@ def ensure_default_admin() -> None:
                     "Set ADMIN_PASSWORD env var to use a known password.",
                     admin_pw,
                 )
+            session.close()
             if create_user("admin", admin_pw, "admin"):
                 logger.warning("Default admin account created.")
+            return
+
+        if admin_pw:
+            # ADMIN_PASSWORD is set — force-update the password every time
+            salt = secrets.token_hex(16)
+            row.password_hash = _hash(admin_pw, salt)
+            row.salt = salt
+            session.commit()
+            logger.info("Admin password updated from ADMIN_PASSWORD env var.")
     except Exception as exc:
         logger.error("ensure_default_admin failed: %s", exc)
     finally:
