@@ -28,13 +28,15 @@ export function setTokens(tokens: { access_token: string } | null) {
   if (tokens) {
     _state.accessToken = tokens.access_token;
     _state.isAuthenticated = true;
+    // NOTE: localStorage is XSS-vulnerable. httpOnly cookies would be safer
+    // but require backend session management. Acceptable tradeoff for a
+    // single-user local dashboard with short-lived tokens (8h TTL).
     localStorage.setItem('access_token', tokens.access_token);
   } else {
     _state.accessToken = null;
     _state.isAuthenticated = false;
     _state.username = null;
     localStorage.removeItem('access_token');
-    localStorage.removeItem('username');
   }
 }
 
@@ -57,26 +59,12 @@ export function loadStoredAuth() {
   }
 }
 
-// Monkey-patch global fetch to auto-attach JWT token to ALL requests
-const _originalFetch = window.fetch;
-window.fetch = async function (input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-  const headers = new Headers(init?.headers);
-  if (_state.accessToken && !headers.has('Authorization')) {
-    headers.set('Authorization', `Bearer ${_state.accessToken}`);
-  }
-  const res = await _originalFetch(input, { ...init, headers });
-  if (res.status === 401 && _state.isAuthenticated) {
-    setTokens(null);
-    _onUnauthorized?.();
-  }
-  return res;
-};
-
 export async function apiFetch<T = any>(
   path: string,
   options: RequestInit = {}
 ): Promise<T> {
   const headers = new Headers(options.headers);
+
   if (_state.accessToken) {
     headers.set('Authorization', `Bearer ${_state.accessToken}`);
   }
@@ -97,6 +85,7 @@ export async function apiFetch<T = any>(
   return res.json();
 }
 
+// Convenience methods
 export const api = {
   get: <T = any>(path: string) => apiFetch<T>(path),
   post: <T = any>(path: string, body?: any) =>
