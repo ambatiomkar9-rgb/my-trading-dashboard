@@ -168,7 +168,7 @@ function DashboardShell() {
     try {
       const [runtimeData, agentData] = await Promise.all([
         apiFetch<RuntimeStatus>('/api/runtime/status'),
-        apiFetch<AgentCard[]>('/api/agent-status'),
+        apiFetch<AgentCard[]>('/agent-status'),
       ]);
       setRuntime(runtimeData || null);
       setAgentCards(Array.isArray(agentData) ? agentData : []);
