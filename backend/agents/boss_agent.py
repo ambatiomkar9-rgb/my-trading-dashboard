@@ -365,7 +365,7 @@ class BossAgent:
         reply = await self._call_ollama(messages)
 
         # Parse tool calls from the response
-        tool_calls = self._extract_tool_calls(reply)
+        tool_calls = self._extract_tool_calls(reply) if reply else []
 
         if tool_calls:
             # Execute tools and build context
@@ -394,7 +394,50 @@ class BossAgent:
             final_reply = await self._call_ollama(followup_messages)
             return final_reply or self._format_tool_results(tool_results)
 
-        return reply or self._fallback_response(message)
+        # Ollama unavailable — use intent-based tool execution
+        if not reply:
+            return await self._intent_execute(message)
+
+        return reply
+
+    async def _intent_execute(self, message: str) -> str:
+        """Execute tools based on intent classification when Ollama is unavailable."""
+        intent = classify_intent(message)
+        symbol = extract_symbol(message)
+
+        intent_tool_map = {
+            "analyze": ("analyze_stock", {"symbol": symbol or "RELIANCE"}),
+            "watchlist": ("get_watchlist", {}),
+            "portfolio": ("get_portfolio", {}),
+            "signals": ("get_signals", {}),
+            "strategy": ("get_strategies", {}),
+            "market": ("get_market_data", {"symbol": symbol or "RELIANCE"}),
+            "system": ("get_system_health", {}),
+            "news": ("get_news_sentiment", {"symbol": symbol or "RELIANCE"}),
+            "trade": ("get_portfolio", {}),
+        }
+
+        if intent in intent_tool_map:
+            tool_name, args = intent_tool_map[intent]
+            result = await execute_tool(tool_name, args, self.ctx)
+            return self._format_tool_results([{"tool": tool_name, "args": args, "result": result}])
+
+        if intent == "help":
+            return (
+                "I can help with:\n"
+                "- **Analyze**: \"analyze INFY\" / \"technical chart RELIANCE\"\n"
+                "- **Watchlist**: \"show watchlist\" / \"add TCS to watchlist\"\n"
+                "- **Portfolio**: \"show portfolio\" / \"my positions\"\n"
+                "- **Signals**: \"show signals\" / \"pending approvals\"\n"
+                "- **Strategies**: \"show strategies\" / \"generate strategy\"\n"
+                "- **Market**: \"price of INFY\" / \"what is LTP of TCS\"\n"
+                "- **System**: \"system health\" / \"agent status\"\n"
+                "- **News**: \"news about RELIANCE\"\n\n"
+                "Note: The AI engine (Ollama) is offline on this server. "
+                "I'm using intent-based routing to execute tools directly."
+            )
+
+        return self._fallback_response(message)
 
     async def _call_ollama(self, messages: list[dict]) -> str:
         """Call Ollama with messages and return the response."""
