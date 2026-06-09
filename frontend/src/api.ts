@@ -64,11 +64,16 @@ function dispatchApiError(message: string) {
   window.dispatchEvent(new CustomEvent('api-error', { detail: message }));
 }
 
+export interface ApiFetchOptions extends RequestInit {
+  silent?: boolean;
+}
+
 export async function apiFetch<T = any>(
   path: string,
-  options: RequestInit = {}
+  options: ApiFetchOptions = {}
 ): Promise<T> {
-  const headers = new Headers(options.headers);
+  const { silent, ...fetchOptions } = options;
+  const headers = new Headers(fetchOptions.headers);
 
   if (_state.accessToken) {
     headers.set('Authorization', `Bearer ${_state.accessToken}`);
@@ -76,10 +81,10 @@ export async function apiFetch<T = any>(
 
   let res: Response;
   try {
-    res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+    res = await fetch(`${API_BASE}${path}`, { ...fetchOptions, headers });
   } catch (err: any) {
     const msg = `Network error: ${err?.message || 'Failed to reach server'}`;
-    dispatchApiError(msg);
+    if (!silent) dispatchApiError(msg);
     throw new Error(msg);
   }
 
@@ -94,7 +99,7 @@ export async function apiFetch<T = any>(
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     const msg = `API error ${res.status}: ${text.slice(0, 200)}`;
-    dispatchApiError(msg);
+    if (!silent) dispatchApiError(msg);
     throw new Error(msg);
   }
 

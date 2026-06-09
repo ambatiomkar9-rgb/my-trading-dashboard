@@ -166,13 +166,19 @@ function DashboardShell() {
 
   const refreshSummary = useCallback(async () => {
     try {
-      const [runtimeData, agentData] = await Promise.all([
+      const [runtimeResult, agentResult] = await Promise.allSettled([
         apiFetch<RuntimeStatus>('/api/runtime/status'),
-        apiFetch<AgentCard[]>('/agent-status'),
+        apiFetch<AgentCard[]>('/agent-status', { silent: true }),
       ]);
-      setRuntime(runtimeData || null);
-      setAgentCards(Array.isArray(agentData) ? agentData : []);
-      setSummaryError(null);
+      const runtimeData = runtimeResult.status === 'fulfilled' ? runtimeResult.value : null;
+      const agentData = agentResult.status === 'fulfilled' ? agentResult.value : [];
+      if (runtimeResult.status === 'fulfilled') {
+        setRuntime(runtimeData);
+      }
+      if (agentResult.status === 'fulfilled') {
+        setAgentCards(Array.isArray(agentData) ? agentData : []);
+      }
+      setSummaryError(runtimeResult.status === 'rejected' ? (runtimeResult.reason?.message || 'Unable to load runtime status') : null);
       setLastRefreshed(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
     } catch (error: any) {
       setSummaryError(error?.message || 'Unable to load runtime status');
