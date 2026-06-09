@@ -14,12 +14,29 @@ interface ScreenerResult {
 export function StockScreenerPage() {
   const [results, setResults] = useState<ScreenerResult[]>([]);
   const [loading, setLoading] = useState(true);
+  const [analyzing, setAnalyzing] = useState<string | null>(null);
 
   useEffect(() => {
     fetchScreenerResults();
     const interval = setInterval(fetchScreenerResults, 30000);
     return () => clearInterval(interval);
   }, []);
+
+  const openInWatchlist = async (symbol: string) => {
+    setAnalyzing(symbol);
+    try {
+      await apiFetch('/api/watchlist/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol, strategy_id: 'default' }),
+      });
+      alert(`Added ${symbol} to watchlist`);
+    } catch (err: any) {
+      alert(err?.message || `Failed to add ${symbol}`);
+    } finally {
+      setAnalyzing(null);
+    }
+  };
 
   const fetchScreenerResults = async () => {
     try {
@@ -103,7 +120,13 @@ export function StockScreenerPage() {
                   </td>
                   <td className="px-4 py-3">{result.timeframe}</td>
                   <td className="px-4 py-3 text-center">
-                    <button className="px-2 py-1 bg-blue-600 rounded text-sm hover:bg-blue-700">Analyze</button>
+                    <button
+                      onClick={() => openInWatchlist(result.symbol)}
+                      disabled={analyzing === result.symbol}
+                      className="px-2 py-1 bg-blue-600 rounded text-sm hover:bg-blue-700 disabled:bg-gray-700"
+                    >
+                      {analyzing === result.symbol ? 'Adding...' : 'Add to Watchlist'}
+                    </button>
                   </td>
                 </tr>
               ))}

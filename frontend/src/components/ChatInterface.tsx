@@ -84,7 +84,6 @@ export function ChatInterface() {
   };
 
   const formatMessage = (content: string) => {
-    // Simple markdown-like formatting
     return content
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
       .replace(/`(.+?)`/g, '<code style="background:#1e293b;padding:1px 4px;border-radius:3px">$1</code>')
@@ -92,48 +91,59 @@ export function ChatInterface() {
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      <h2 style={{ margin: '0 0 12px' }}>Chat</h2>
-      <div style={{ flex: 1, overflowY: 'auto', padding: 8, background: '#111', borderRadius: 8 }}>
+    <div className="flex flex-col h-full p-4">
+      <h2 className="text-lg font-bold mb-3" style={{color:'var(--accent)'}}>Boss Agent Chat</h2>
+      <div className="flex-1 overflow-y-auto rounded-lg p-3 mb-3" style={{background:'var(--surface)', border:'1px solid var(--border)'}}>
         {history.length === 0 && (
-          <div style={{ color: '#666', textAlign: 'center', padding: 40 }}>
-            <p style={{ fontSize: 16, marginBottom: 8 }}>Boss Agent</p>
-            <p style={{ fontSize: 12 }}>Ask me to analyze stocks, manage your watchlist, check portfolio, generate strategies, and more.</p>
+          <div className="flex items-center justify-center h-full">
+            <div className="text-center" style={{color:'var(--text-dim)'}}>
+              <p className="text-lg font-semibold mb-2" style={{color:'var(--accent)'}}>Boss Agent</p>
+              <p style={{fontSize:12}}>Ask me to analyze stocks, manage your watchlist, check portfolio, generate strategies, and more.</p>
+            </div>
           </div>
         )}
         {history.map((m, i) => (
-          <div key={i} style={{ marginBottom: 12, padding: '8px 12px', borderRadius: 8, background: m.role === 'user' ? '#1a1a2e' : '#0f172a', border: '1px solid #1e293b' }}>
-            <div style={{ marginBottom: 4 }}>
-              <strong style={{ color: m.role === 'user' ? '#60a5fa' : '#4ade80', fontSize: 12 }}>
+          <div
+            key={i}
+            className="mb-3 p-3 rounded-lg"
+            style={{
+              background: m.role === 'user' ? 'var(--panel-2)' : 'var(--panel)',
+              border: '1px solid var(--border)',
+            }}
+          >
+            <div className="mb-1">
+              <strong style={{color: m.role === 'user' ? 'var(--accent)' : 'var(--green)', fontSize:12}}>
                 {m.role === 'user' ? 'You' : 'Boss Agent'}
               </strong>
               {m.timestamp && (
-                <span style={{ color: '#555', fontSize: 10, marginLeft: 8 }}>
+                <span className="ml-2" style={{color:'var(--text-dim)', fontSize:10}}>
                   {new Date(m.timestamp).toLocaleTimeString()}
                 </span>
               )}
             </div>
             <div
-              style={{ color: '#e5e7eb', fontSize: 14, lineHeight: 1.5 }}
+              style={{color:'var(--text)', fontSize:14, lineHeight:1.5}}
               dangerouslySetInnerHTML={{ __html: formatMessage(m.content) }}
             />
           </div>
         ))}
         <div ref={historyEndRef} />
       </div>
-      <div style={{ display: 'flex', marginTop: 8, gap: 8 }}>
+      <div className="flex gap-2">
         <input
           value={message}
           onChange={(e) => setMessage(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && !loading && sendMessage()}
           placeholder="Analyze INFY, add TCS to watchlist, show portfolio..."
-          style={{ flex: 1, padding: 10, borderRadius: 8, border: '1px solid #333', background: '#1a1a2e', color: '#fff' }}
+          className="flex-1 input"
+          style={{padding:10}}
           disabled={loading}
         />
         <button
           onClick={sendMessage}
           disabled={loading || !message.trim()}
-          style={{ padding: '10px 20px', borderRadius: 8, background: '#2563eb', color: '#fff', border: 'none', cursor: 'pointer' }}
+          className="btn btn-accent"
+          style={{padding:'10px 20px'}}
         >
           {loading ? '...' : 'Send'}
         </button>

@@ -47,12 +47,19 @@ export function BrokerReconciliation() {
   const fetchAccount = useCallback(async () => {
     try {
       const [acctRes, posRes] = await Promise.allSettled([
-        api.get('/api/broker/account'),
-        api.get('/api/portfolio/positions'),
+        api.get('/api/broker/upstox/status'),
+        api.get('/positions'),
       ]);
 
       if (acctRes.status === 'fulfilled') {
-        setAccount(acctRes.value);
+        const d = acctRes.value;
+        setAccount({
+          broker: 'upstox',
+          mode: d?.broker_mode || 'paper',
+          connected: d?.authenticated || false,
+          balance: d?.balance,
+          last_sync: d?.last_synced,
+        });
       }
 
       if (posRes.status === 'fulfilled') {
@@ -73,11 +80,8 @@ export function BrokerReconciliation() {
   const handleSyncNow = async () => {
     setSyncing(true);
     try {
-      const result = await api.post('/api/broker/reconcile');
-      setReconResult(result);
-      if (result.mismatches) {
-        setMismatches(result.mismatches);
-      }
+      // Placeholder — reconcile endpoint not yet implemented
+      alert('Broker reconciliation not yet implemented in backend');
     } catch (err) {
       console.error('Reconciliation failed:', err);
     } finally {
@@ -86,13 +90,7 @@ export function BrokerReconciliation() {
   };
 
   const handleForceSync = async (symbol: string) => {
-    if (!window.confirm(`Force sync ${symbol}? This overwrites local data with broker data.`)) return;
-    try {
-      await api.post(`/api/broker/sync/${encodeURIComponent(symbol)}`);
-      await fetchAccount();
-    } catch (err) {
-      console.error('Force sync failed:', err);
-    }
+    alert('Force sync not yet implemented in backend');
   };
 
   if (loading) {

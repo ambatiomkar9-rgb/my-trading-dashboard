@@ -40,6 +40,7 @@ import { PortfolioPage } from './components/PortfolioPage';
 import { LiveStatusPanel } from './components/LiveStatusPanel';
 import { BrokerReconciliation } from './components/BrokerReconciliation';
 import { PerformancePage } from './components/PerformancePage';
+import { ToastContainer } from './components/ToastContainer';
 
 type Page =
   | 'overview'
@@ -153,6 +154,7 @@ function DashboardContent() {
   return (
     <div className="app-layout">
       <div className="scanline-overlay" />
+      <ToastContainer />
 
       {/* Mobile header */}
       <header className="mobile-header lg:hidden">

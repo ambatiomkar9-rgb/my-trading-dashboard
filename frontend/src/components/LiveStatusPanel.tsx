@@ -48,13 +48,24 @@ export function LiveStatusPanel() {
   const fetchStatus = useCallback(async () => {
     try {
       const [sysRes, portRes, ordersRes] = await Promise.allSettled([
-        api.get('/api/system/status'),
+        api.get('/api/system/health'),
         api.get('/api/portfolio'),
-        api.get('/api/executions?limit=10'),
+        api.get('/order-history'),
       ]);
 
       if (sysRes.status === 'fulfilled') {
-        setSystem(sysRes.value);
+        const h = sysRes.value;
+        setSystem({
+          market_engine: h?.ollama_status || 'unknown',
+          position_manager: h?.broker_status || 'unknown',
+          trade_execution: 'n/a',
+          news_sentiment: 'n/a',
+          telegram_poller: 'n/a',
+          kill_switch: 'n/a',
+          last_tick: h?.timestamp || '',
+          open_executions: 0,
+          filled_today: 0,
+        });
       }
 
       if (portRes.status === 'fulfilled') {
